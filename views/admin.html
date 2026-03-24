@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Software Orchestrator</title>
+  <link rel="stylesheet" href="/plugins/sworch/style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar glass">
+      <div class="brand">
+        <div class="logo">SO</div>
+        <div>
+          <h1>Software Orchestrator</h1>
+          <p>Jobs, Queue, Inventar</p>
+        </div>
+      </div>
+      <nav class="nav">
+        <button class="nav-btn active" data-view="dashboard">Dashboard</button>
+        <button class="nav-btn" data-view="jobs">Jobs</button>
+        <button class="nav-btn" data-view="assignments">Bulk-Zuweisung</button>
+        <button class="nav-btn" data-view="queue">Warteschlange</button>
+        <button class="nav-btn" data-view="inventory">Inventar</button>
+      </nav>
+      <div class="side-card">
+        <div class="muted">Adapter</div>
+        <div id="adapterState">wird geladen …</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar glass">
+        <div>
+          <h2 id="viewTitle">Dashboard</h2>
+          <p class="muted">Persistente Jobs auf ScriptTask-Basis mit moderner Oberfläche.</p>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="refreshBtn">Aktualisieren</button>
+          <button class="primary" id="newJobBtn">Neuer Job</button>
+        </div>
+      </header>
+
+      <section id="dashboardView" class="view active stack">
+        <div id="statsGrid" class="stats"></div>
+        <div class="grid-two">
+          <article class="panel glass">
+            <div class="panel-head"><h3>Neueste Läufe</h3></div>
+            <div id="recentRuns"></div>
+          </article>
+          <article class="panel glass">
+            <div class="panel-head"><h3>Top-Software</h3></div>
+            <div id="inventoryHighlights" class="chips"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="jobsView" class="view stack">
+        <article class="panel glass">
+          <div class="panel-head"><h3>Jobs</h3></div>
+          <div id="jobsTable"></div>
+        </article>
+      </section>
+
+      <section id="assignmentsView" class="view stack">
+        <article class="panel glass">
+          <div class="panel-head"><h3>Mehrfachauswahl & Zuweisung</h3></div>
+          <div class="grid-two">
+            <div>
+              <label>Geräte</label>
+              <input id="deviceFilter" class="input" placeholder="Geräte filtern …">
+              <div id="deviceList" class="picker"></div>
+            </div>
+            <div>
+              <label>Jobs</label>
+              <input id="jobFilter" class="input" placeholder="Jobs filtern …">
+              <div id="jobList" class="picker"></div>
+            </div>
+          </div>
+          <div class="toolbar-row">
+            <label class="checkbox"><input type="checkbox" id="enqueueNowAssign"> sofort in Queue legen</label>
+            <button class="primary" id="assignBtn">Zuweisen</button>
+            <button class="secondary" id="queueBtn">Nur Job(s) jetzt ausführen</button>
+          </div>
+        </article>
+      </section>
+
+      <section id="queueView" class="view stack">
+        <article class="panel glass">
+          <div class="panel-head"><h3>Runs / Warteschlange</h3></div>
+          <div id="runsTable"></div>
+        </article>
+      </section>
+
+      <section id="inventoryView" class="view stack">
+        <article class="panel glass">
+          <div class="panel-head"><h3>Softwareinventar</h3></div>
+          <div id="inventoryTable"></div>
+        </article>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="jobDialog" class="dialog">
+    <form id="jobForm" method="dialog" class="stack">
+      <div class="dialog-head">
+        <h3>Neuen Job anlegen</h3>
+        <button type="button" class="icon-btn" id="closeJobDialog">✕</button>
+      </div>
+      <div class="form-grid">
+        <label>Name<input class="input" name="name" required></label>
+        <label>Typ
+          <select class="input" name="scriptType">
+            <option value="powershell">PowerShell</option>
+            <option value="shell">Shell/CMD</option>
+          </select>
+        </label>
+        <label class="full">Beschreibung<textarea class="input" name="description"></textarea></label>
+        <label class="full">Script<textarea class="input code" name="scriptBody" required></textarea></label>
+        <label>Zeitplan
+          <select class="input" name="scheduleMode">
+            <option value="manual">Manuell</option>
+            <option value="onConnect">Bei Online-Status</option>
+            <option value="interval">Intervall</option>
+            <option value="daily">Täglich</option>
+            <option value="weekly">Wöchentlich</option>
+            <option value="once">Einmalig</option>
+          </select>
+        </label>
+        <label>Wert (z.B. 60 / 22:00 / 22:00|1,2,3 / 2026-03-30T19:00:00)<input class="input" name="scheduleValue"></label>
+        <label>Max. Versuche<input class="input" name="maxAttempts" type="number" min="1" max="20" value="3"></label>
+        <label>Ziel-NodeIDs (kommagetrennt)<input class="input" name="targetNodeIds"></label>
+        <label class="checkbox"><input type="checkbox" name="enqueueNow"> sofort in Queue legen</label>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" class="secondary" id="cancelJobDialog">Abbrechen</button>
+        <button type="submit" class="primary">Speichern</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/plugins/sworch/app.js"></script>
+</body>
+</html>

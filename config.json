@@ -1,0 +1,22 @@
+{
+  "name": "Software Orchestrator",
+  "shortName": "sworch",
+  "version": "0.2.1",
+  "author": "OpenAI",
+  "description": "Persistente Job-Queue, moderne GUI, Bulk-Zuweisungen und Softwareinventar fuer MeshCentral auf Basis von ScriptTask.",
+  "hasAdminPanel": true,
+  "hasDevicePanel": true,
+  "homepage": "https://github.com/Not-Janik/meshcentral-software-orchestrator",
+  "changelogUrl": "https://raw.githubusercontent.com/Not-Janik/meshcentral-software-orchestrator/main/CHANGELOG.md",
+  "configUrl": "https://raw.githubusercontent.com/Not-Janik/meshcentral-software-orchestrator/main/config.json",
+  "downloadUrl": "https://github.com/Not-Janik/meshcentral-software-orchestrator/archive/refs/heads/main.zip",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Not-Janik/meshcentral-software-orchestrator.git"
+  },
+  "versionHistoryUrl": "https://api.github.com/repos/Not-Janik/meshcentral-software-orchestrator/tags",
+  "meshCentralCompat": ">=1.1.0",
+  "modules_meshcore": [
+    "sworch-agent.js"
+  ]
+}
