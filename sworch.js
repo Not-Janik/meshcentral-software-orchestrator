@@ -48,10 +48,26 @@ module.exports = function (parent) {
     return fs.readFileSync(path.join(__dirname, 'views', name), 'utf8');
   }
 
+  function getApp() {
+    return parent?.webserver?.app || parent?.app || null;
+  }
+
+  function isAuthorized(req) {
+    return !!(req?.session?.userid || req?.user?._id || req?.user?.name);
+  }
+
+  function getUserId(req) {
+    return req?.session?.userid || req?.user?._id || req?.user?.name || null;
+  }
+
   function sendJson(res, payload, status = 200) {
     res.status(status);
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify(payload));
+  }
+
+  function unauthorized(res) {
+    return sendJson(res, { ok: false, error: 'Unauthorized' }, 401);
   }
 
   function parseBody(req) {
@@ -244,12 +260,53 @@ module.exports = function (parent) {
     if (store.data.settings.inventoryRefreshOnConnect) requestInventory(nodeid);
   }
 
+  function renderAdminPage(req, res) {
+    if (!isAuthorized(req)) {
+      res.status(401).type('text/plain').end('Unauthorized');
+      return true;
+    }
+    res.type('html').end(render('admin.html'));
+    return true;
+  }
+
+  function renderDeviceTab(req, res) {
+    if (!isAuthorized(req)) {
+      res.status(401).type('text/plain').end('Unauthorized');
+      return true;
+    }
+    res.type('html').end(render('device-tab.html'));
+    return true;
+  }
+
   async function api(req, res) {
     const url = new URL(req.url, 'http://localhost');
     const pathname = url.pathname;
 
+    if (pathname === '/plugins/sworch' || pathname === '/plugins/sworch/' || pathname === '/plugins/sworch/index.html') {
+      return renderAdminPage(req, res);
+    }
+    if (pathname === '/plugins/sworch/device' || pathname === '/plugins/sworch/device/') {
+      return renderDeviceTab(req, res);
+    }
+    if (pathname === '/plugins/sworch/style.css') {
+      res.type('text/css').end(render('style.css'));
+      return true;
+    }
+    if (pathname === '/plugins/sworch/app.js') {
+      res.type('application/javascript').end(render('app.js'));
+      return true;
+    }
+    if (pathname === '/plugins/sworch/device-tab.js') {
+      res.type('application/javascript').end(render('device-tab.js'));
+      return true;
+    }
+
+    if (pathname.startsWith('/plugins/sworch/api/')) {
+      if (!isAuthorized(req)) return unauthorized(res);
+    }
+
     if (req.method === 'GET' && pathname === '/plugins/sworch/api/meta') {
-      return sendJson(res, { ok: true, adapter: adapter.describe(), settings: store.data.settings });
+      return sendJson(res, { ok: true, adapter: adapter.describe(), settings: store.data.settings, user: getUserId(req) });
     }
     if (req.method === 'GET' && pathname === '/plugins/sworch/api/devices') {
       return sendJson(res, { ok: true, devices: getDevices() });
@@ -262,8 +319,9 @@ module.exports = function (parent) {
       return sendJson(res, { ok: true, runs });
     }
     if (req.method === 'GET' && pathname === '/plugins/sworch/api/inventory') {
+      const nodeid = url.searchParams.get('nodeid');
       const inventory = store.list('inventory').sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
-      return sendJson(res, { ok: true, inventory });
+      return sendJson(res, { ok: true, inventory: nodeid ? inventory.filter(x => x.nodeid === nodeid) : inventory });
     }
     if (req.method === 'GET' && pathname === '/plugins/sworch/api/dashboard') {
       const jobs = expandedJobs();
@@ -302,7 +360,7 @@ module.exports = function (parent) {
       };
       store.upsert('jobs', job.id, job);
       uniq(body.targetNodeIds).forEach(nodeid => ensureAssignment(job.id, nodeid));
-      if (body.enqueueNow) uniq(body.targetNodeIds).forEach(nodeid => enqueueRun(job, nodeid, 'manual')); 
+      if (body.enqueueNow) uniq(body.targetNodeIds).forEach(nodeid => enqueueRun(job, nodeid, 'manual'));
       return sendJson(res, { ok: true, job }, 201);
     }
 
@@ -371,15 +429,22 @@ module.exports = function (parent) {
   }
 
   plugin.exports = ['registerPluginTab', 'onDeviceRefreshEnd'];
-  plugin.registerPluginTab = function () { return { tabId: 'sworch', tabTitle: 'Software Orchestrator' }; };
-  plugin.onDeviceRefreshEnd = function () { return render('device-tab.html'); };
+  plugin.registerPluginTab = function () {
+    return { tabId: 'sworch', tabTitle: 'Software Orchestrator' };
+  };
+  plugin.onDeviceRefreshEnd = function () {
+    return render('device-tab.html');
+  };
   plugin.server_startup = function () {
-    if (parent?.app) {
-      parent.app.get('/plugins/sworch', (req, res) => res.type('html').end(render('admin.html')));
-      parent.app.get('/plugins/sworch/style.css', (req, res) => res.type('text/css').end(render('style.css')));
-      parent.app.get('/plugins/sworch/app.js', (req, res) => res.type('application/javascript').end(render('app.js')));
-      parent.app.get('/plugins/sworch/device-tab.js', (req, res) => res.type('application/javascript').end(render('device-tab.js')));
-      parent.app.use('/plugins/sworch/api', async (req, res, next) => {
+    const app = getApp();
+    if (app) {
+      app.get('/plugins/sworch', (req, res) => renderAdminPage(req, res));
+      app.get('/plugins/sworch/', (req, res) => renderAdminPage(req, res));
+      app.get('/plugins/sworch/device', (req, res) => renderDeviceTab(req, res));
+      app.get('/plugins/sworch/style.css', (req, res) => res.type('text/css').end(render('style.css')));
+      app.get('/plugins/sworch/app.js', (req, res) => res.type('application/javascript').end(render('app.js')));
+      app.get('/plugins/sworch/device-tab.js', (req, res) => res.type('application/javascript').end(render('device-tab.js')));
+      app.use('/plugins/sworch/api', async (req, res, next) => {
         try {
           const handled = await api(req, res);
           if (handled === false) next();
@@ -391,7 +456,7 @@ module.exports = function (parent) {
     timer = setInterval(processQueue, Number(store.data.settings.queuePollSeconds || 30) * 1000);
   };
   plugin.onAgentConnect = onAgentConnect;
-  plugin.handleAdminReq = api;
+  plugin.handleAdminReq = function (req, res) { return api(req, res); };
   plugin.shutdown = function () { if (timer) clearInterval(timer); };
   return plugin;
 };

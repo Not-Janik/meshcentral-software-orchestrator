@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2
+- Admin- und API-Routen auf authentifizierte MeshCentral-Session umgestellt
+- Admin-Seite und Device-Tab robuster registriert
+- Device-Tab liest Inventar gezielt fuer das geoeffnete Geraet
+
+# Changelog
+
 ## 0.2.1
 - Korrigierte MeshCentral-Plugin-Metadaten fuer GitHub-Import.
 - Echte URLs fuer Homepage, Config, Download und Versionshistorie eingetragen.
