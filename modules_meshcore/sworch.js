@@ -92,3 +92,6 @@ function consoleaction(args, rights, sessionid, parent) {
       return;
   }
 }
+
+
+module.exports = { consoleaction: consoleaction };
