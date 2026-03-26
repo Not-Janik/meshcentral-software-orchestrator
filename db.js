@@ -20,7 +20,6 @@ class JsonStore {
     fs.mkdirSync(baseDir, { recursive: true });
     this.load();
   }
-
   load() {
     if (!fs.existsSync(this.file)) return;
     try {
@@ -30,15 +29,8 @@ class JsonStore {
       console.error('[sworch] DB load failed:', err.message);
     }
   }
-
-  save() {
-    fs.writeFileSync(this.file, JSON.stringify(this.data, null, 2));
-  }
-
-  id(prefix) {
-    return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-  }
-
+  save() { fs.writeFileSync(this.file, JSON.stringify(this.data, null, 2)); }
+  id(prefix) { return prefix + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8); }
   list(collection) { return Object.values(this.data[collection] || {}); }
   get(collection, id) { return (this.data[collection] || {})[id] || null; }
   upsert(collection, id, value) {
@@ -50,7 +42,7 @@ class JsonStore {
   patch(collection, id, partial) {
     const cur = this.get(collection, id);
     if (!cur) return null;
-    return this.upsert(collection, id, { ...cur, ...partial });
+    return this.upsert(collection, id, Object.assign({}, cur, partial));
   }
   remove(collection, id) {
     if (!this.data[collection] || !this.data[collection][id]) return false;

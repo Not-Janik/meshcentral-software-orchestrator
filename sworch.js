@@ -1,3 +1,4 @@
+
 'use strict';
 
 const path = require('path');
@@ -6,9 +7,9 @@ const { JsonStore } = require('./db');
 const { createScriptTaskAdapter } = require('./scripttask-adapter');
 
 function nowIso() { return new Date().toISOString(); }
-function uniq(values) { return [...new Set((Array.isArray(values) ? values : [values]).filter(Boolean))]; }
-function hash(input) { return crypto.createHash('sha256').update(String(input || '')).digest('hex'); }
-function escHtml(v) { return String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+function uniq(arr) { return Array.from(new Set((Array.isArray(arr) ? arr : [arr]).filter(Boolean))); }
+function hash(text) { return crypto.createHash('sha256').update(String(text || '')).digest('hex'); }
+function esc(text) { return String(text == null ? '' : text).replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; }); }
 
 function computeNextRun(schedule, ref) {
   const base = ref ? new Date(ref) : new Date();
@@ -16,21 +17,21 @@ function computeNextRun(schedule, ref) {
   if (schedule.mode === 'once') return schedule.runAt || null;
   if (schedule.mode === 'interval') {
     const mins = Math.max(1, Number(schedule.intervalMinutes || 60));
-    return new Date(base.getTime() + mins * 60000).toISOString();
+    return new Date(base.getTime() + (mins * 60000)).toISOString();
   }
   if (schedule.mode === 'daily') {
-    const d = new Date(base);
+    const d = new Date(base.getTime());
     d.setHours(Number(schedule.hour || 0), Number(schedule.minute || 0), 0, 0);
     if (d <= base) d.setDate(d.getDate() + 1);
     return d.toISOString();
   }
   if (schedule.mode === 'weekly') {
-    const weekdays = uniq(schedule.weekdays || []).map(Number).filter(x => x >= 0 && x <= 6);
+    const weekdays = uniq(schedule.weekdays || []).map(function (x) { return Number(x); }).filter(function (x) { return x >= 0 && x <= 6; });
     for (let i = 0; i < 14; i++) {
-      const d = new Date(base);
+      const d = new Date(base.getTime());
       d.setDate(base.getDate() + i);
       d.setHours(Number(schedule.hour || 0), Number(schedule.minute || 0), 0, 0);
-      if (d > base && weekdays.includes(d.getDay())) return d.toISOString();
+      if (d > base && weekdays.indexOf(d.getDay()) >= 0) return d.toISOString();
     }
   }
   return null;
@@ -42,100 +43,108 @@ module.exports.sworch = function (parent) {
   obj.meshServer = parent && parent.parent ? parent.parent : parent;
   obj.shortName = 'sworch';
   obj.exports = ['onDeviceRefreshEnd'];
-  obj.intervalTimer = null;
+  obj.timer = null;
   obj.dataPath = path.join((obj.meshServer && obj.meshServer.datapath) || __dirname, 'sworch-data');
   obj.db = new JsonStore(obj.dataPath);
   obj.adapter = createScriptTaskAdapter(obj.meshServer, console);
-  obj.activeDispatches = new Set();
+  obj.activeDispatches = {};
 
   function getWsAgents() {
-    return obj.meshServer?.webserver?.wsagents || obj.meshServer?.wsagents || {};
+    return (obj.meshServer && obj.meshServer.webserver && obj.meshServer.webserver.wsagents) ||
+           obj.meshServer.wsagents || {};
   }
 
   function getDevices() {
-    const devices = [];
-    const seen = new Set();
     const wsagents = getWsAgents();
-    const webDevices = obj.meshServer?.webserver?.devices || {};
+    const webDevices = (obj.meshServer && obj.meshServer.webserver && obj.meshServer.webserver.devices) || {};
+    const map = {};
 
-    for (const [nodeid, device] of Object.entries(webDevices)) {
-      seen.add(nodeid);
-      devices.push({
-        nodeid,
-        name: device.name || device.rname || nodeid,
-        meshid: device.meshid || device.meshId || null,
-        platform: device.osdesc || device.platform || 'unknown',
+    Object.keys(webDevices).forEach(function (nodeid) {
+      const d = webDevices[nodeid] || {};
+      map[nodeid] = {
+        nodeid: nodeid,
+        name: d.name || d.rname || nodeid,
+        meshid: d.meshid || d.meshId || '',
+        platform: d.osdesc || d.platform || 'unknown',
         online: !!wsagents[nodeid]
-      });
-    }
+      };
+    });
 
-    for (const [nodeid, agent] of Object.entries(wsagents)) {
-      if (seen.has(nodeid)) continue;
-      devices.push({
-        nodeid,
-        name: agent.dbNode?.name || agent.name || nodeid,
-        meshid: agent.dbMeshKey || null,
-        platform: agent.dbNode?.osdesc || 'unknown',
-        online: true
-      });
-    }
+    Object.keys(wsagents).forEach(function (nodeid) {
+      const a = wsagents[nodeid] || {};
+      if (!map[nodeid]) {
+        map[nodeid] = {
+          nodeid: nodeid,
+          name: (a.dbNode && a.dbNode.name) || a.name || nodeid,
+          meshid: a.dbMeshKey || '',
+          platform: (a.dbNode && a.dbNode.osdesc) || 'unknown',
+          online: true
+        };
+      } else {
+        map[nodeid].online = true;
+      }
+    });
 
-    return devices.sort((a, b) => String(a.name).localeCompare(String(b.name), 'de'));
+    return Object.values(map).sort(function (a, b) { return String(a.name).localeCompare(String(b.name), 'de'); });
   }
 
   function getNodeName(nodeid) {
-    const device = getDevices().find(d => d.nodeid === nodeid);
-    return device ? device.name : nodeid;
+    const d = getDevices().find(function (x) { return x.nodeid === nodeid; });
+    return d ? d.name : nodeid;
   }
 
   function isOnline(nodeid) { return !!getWsAgents()[nodeid]; }
 
   function expandedJobs() {
     const jobs = obj.db.list('jobs');
-    const assignments = obj.db.list('assignments').filter(x => x.active !== false);
+    const assignments = obj.db.list('assignments').filter(function (x) { return x.active !== false; });
     const runs = obj.db.list('runs');
-    return jobs.map(job => {
-      const a = assignments.filter(x => x.jobId === job.id);
-      const r = runs.filter(x => x.jobId === job.id);
-      return {
-        ...job,
-        nodeIds: uniq(a.map(x => x.nodeid)),
-        assignedCount: a.length,
-        queued: r.filter(x => x.status === 'queued').length,
-        running: r.filter(x => x.status === 'running').length,
-        failed: r.filter(x => x.status === 'failed').length,
-        success: r.filter(x => x.status === 'success').length,
-        lastRunAt: r.map(x => x.updated || x.created || '').sort().slice(-1)[0] || null
-      };
-    }).sort((a, b) => String(a.name).localeCompare(String(b.name), 'de'));
+    return jobs.map(function (job) {
+      const jobAssignments = assignments.filter(function (x) { return x.jobId === job.id; });
+      const jobRuns = runs.filter(function (x) { return x.jobId === job.id; });
+      return Object.assign({}, job, {
+        nodeIds: uniq(jobAssignments.map(function (x) { return x.nodeid; })),
+        assignedCount: jobAssignments.length,
+        queued: jobRuns.filter(function (x) { return x.status === 'queued'; }).length,
+        running: jobRuns.filter(function (x) { return x.status === 'running'; }).length,
+        failed: jobRuns.filter(function (x) { return x.status === 'failed'; }).length,
+        success: jobRuns.filter(function (x) { return x.status === 'success'; }).length
+      });
+    }).sort(function (a, b) { return String(a.folder || '').localeCompare(String(b.folder || ''), 'de') || String(a.name).localeCompare(String(b.name), 'de'); });
   }
 
   function ensureAssignment(jobId, nodeid) {
-    const existing = obj.db.list('assignments').find(x => x.jobId === jobId && x.nodeid === nodeid && x.active !== false);
-    if (existing) return existing;
-    const rec = { id: obj.db.id('asg'), jobId, nodeid, active: true, createdAt: nowIso() };
+    const current = obj.db.list('assignments').find(function (x) { return x.jobId === jobId && x.nodeid === nodeid; });
+    if (current) {
+      current.active = true;
+      current.updatedAt = nowIso();
+      obj.db.upsert('assignments', current.id, current);
+      return current;
+    }
+    const rec = { id: obj.db.id('asg'), jobId: jobId, nodeid: nodeid, active: true, createdAt: nowIso(), updatedAt: nowIso() };
     obj.db.upsert('assignments', rec.id, rec);
     return rec;
   }
 
   function replaceAssignments(jobId, nodeIds) {
-    const keep = new Set(uniq(nodeIds));
-    for (const entry of obj.db.list('assignments').filter(x => x.jobId === jobId)) {
-      if (keep.has(entry.nodeid)) {
-        if (entry.active === false) obj.db.patch('assignments', entry.id, { active: true });
-        keep.delete(entry.nodeid);
-      } else if (entry.active !== false) {
-        obj.db.patch('assignments', entry.id, { active: false });
+    const wanted = uniq(nodeIds || []);
+    obj.db.list('assignments').filter(function (x) { return x.jobId === jobId; }).forEach(function (a) {
+      if (wanted.indexOf(a.nodeid) >= 0) {
+        a.active = true;
+      } else {
+        a.active = false;
       }
-    }
-    for (const nodeid of keep) ensureAssignment(jobId, nodeid);
+      a.updatedAt = nowIso();
+      obj.db.upsert('assignments', a.id, a);
+    });
+    wanted.forEach(function (nodeid) { ensureAssignment(jobId, nodeid); });
   }
 
   function createRun(job, nodeid, reason) {
     return {
       id: obj.db.id('run'),
       jobId: job.id,
-      nodeid,
+      nodeid: nodeid,
       nodeName: getNodeName(nodeid),
       scriptName: job.name,
       scriptType: job.scriptType,
@@ -149,10 +158,7 @@ module.exports.sworch = function (parent) {
       created: nowIso(),
       updated: nowIso(),
       nextEligibleAt: nowIso(),
-      stdout: '',
-      stderr: '',
-      exitCode: null,
-      lastError: null,
+      stdout: '', stderr: '', exitCode: null, lastError: null,
       expiresAt: job.expiresAt || null
     };
   }
@@ -163,49 +169,55 @@ module.exports.sworch = function (parent) {
     return run;
   }
 
+  function queueJob(jobId, nodeIds, reason) {
+    const job = obj.db.get('jobs', jobId);
+    if (!job) return [];
+    const targets = uniq((nodeIds && nodeIds.length) ? nodeIds : obj.db.list('assignments').filter(function (a) { return a.jobId === jobId && a.active !== false; }).map(function (a) { return a.nodeid; }));
+    return targets.map(function (nodeid) { return enqueueRun(job, nodeid, reason || 'manual'); });
+  }
+
   function requestInventory(nodeid) {
     const agent = getWsAgents()[nodeid];
     if (!agent || typeof agent.send !== 'function') return false;
-    agent.send(JSON.stringify({ action: 'plugin', plugin: 'sworch', subaction: 'collect-inventory', nodeid }));
+    agent.send(JSON.stringify({ action: 'plugin', plugin: 'sworch', subaction: 'collect-inventory', nodeid: nodeid }));
     return true;
   }
 
   function onAgentOnline(nodeid) {
-    for (const asg of obj.db.list('assignments').filter(x => x.nodeid === nodeid && x.active !== false)) {
+    obj.db.list('assignments').filter(function (x) { return x.nodeid === nodeid && x.active !== false; }).forEach(function (asg) {
       const job = obj.db.get('jobs', asg.jobId);
-      if (!job || job.enabled === false) continue;
+      if (!job || job.enabled === false) return;
       if (job.schedule && job.schedule.mode === 'onConnect') {
-        const pending = obj.db.list('runs').find(r => r.jobId === job.id && r.nodeid === nodeid && (r.status === 'queued' || r.status === 'running'));
-        if (!pending) enqueueRun(job, nodeid, 'onConnect');
+        const hasPending = obj.db.list('runs').find(function (r) { return r.jobId === job.id && r.nodeid === nodeid && (r.status === 'queued' || r.status === 'running'); });
+        if (!hasPending) enqueueRun(job, nodeid, 'onConnect');
       }
-    }
+    });
     if (obj.db.data.settings.inventoryRefreshOnConnect) requestInventory(nodeid);
   }
 
   function processSchedules() {
     const now = new Date();
-    for (const job of obj.db.list('jobs').filter(j => j.enabled !== false)) {
+    obj.db.list('jobs').filter(function (j) { return j.enabled !== false; }).forEach(function (job) {
       const schedule = job.schedule || { mode: 'manual' };
-      if (schedule.mode === 'manual' || schedule.mode === 'onConnect') continue;
+      if (schedule.mode === 'manual' || schedule.mode === 'onConnect') return;
       const nextRunAt = schedule.nextRunAt || computeNextRun(schedule, now);
-      if (!nextRunAt) continue;
+      if (!nextRunAt) return;
       if (new Date(nextRunAt) <= now) {
-        const targets = obj.db.list('assignments').filter(a => a.jobId === job.id && a.active !== false).map(a => a.nodeid);
-        uniq(targets).forEach(nodeid => enqueueRun(job, nodeid, 'schedule'));
-        job.schedule = { ...schedule, nextRunAt: computeNextRun(schedule, new Date(Date.now() + 1000)) };
+        queueJob(job.id, null, 'schedule');
+        job.schedule = Object.assign({}, schedule, { nextRunAt: computeNextRun(schedule, new Date(Date.now() + 1000)) });
         job.updatedAt = nowIso();
         obj.db.upsert('jobs', job.id, job);
       } else if (!schedule.nextRunAt) {
-        job.schedule = { ...schedule, nextRunAt };
+        job.schedule = Object.assign({}, schedule, { nextRunAt: nextRunAt });
         obj.db.upsert('jobs', job.id, job);
       }
-    }
+    });
   }
 
   function dispatchRun(run) {
-    if (obj.activeDispatches.has(run.id)) return false;
+    if (obj.activeDispatches[run.id]) return false;
     if (!isOnline(run.nodeid)) return false;
-    obj.activeDispatches.add(run.id);
+    obj.activeDispatches[run.id] = true;
     obj.db.patch('runs', run.id, { status: 'running', attempts: Number(run.attempts || 0) + 1, updated: nowIso() });
     try {
       const result = obj.adapter.dispatchRun(obj.db.get('runs', run.id));
@@ -214,16 +226,16 @@ module.exports.sworch = function (parent) {
       return true;
     } catch (err) {
       const current = obj.db.get('runs', run.id);
-      const attempts = Number(current?.attempts || 1);
-      const maxAttempts = Number(current?.maxAttempts || 3);
+      const attempts = Number((current && current.attempts) || 1);
+      const maxAttempts = Number((current && current.maxAttempts) || 3);
       const willRetry = attempts < maxAttempts;
       obj.db.patch('runs', run.id, {
         status: willRetry ? 'queued' : 'failed',
         lastError: String(err.message || err),
-        nextEligibleAt: willRetry ? new Date(Date.now() + attempts * 300000).toISOString() : current?.nextEligibleAt,
+        nextEligibleAt: willRetry ? new Date(Date.now() + attempts * 300000).toISOString() : ((current && current.nextEligibleAt) || nowIso()),
         updated: nowIso()
       });
-      obj.activeDispatches.delete(run.id);
+      delete obj.activeDispatches[run.id];
       return false;
     }
   }
@@ -233,42 +245,45 @@ module.exports.sworch = function (parent) {
     const now = new Date();
     const retentionMs = Number(obj.db.data.settings.retentionDays || 90) * 86400000;
 
-    for (const run of obj.db.list('runs')) {
+    obj.db.list('runs').forEach(function (run) {
       if (run.status === 'queued' && run.expiresAt && new Date(run.expiresAt) <= now) {
         obj.db.patch('runs', run.id, { status: 'expired', updated: nowIso(), lastError: 'Ablaufdatum erreicht' });
-        continue;
       }
-      if (run.finishedAt && (now.getTime() - new Date(run.finishedAt).getTime()) > retentionMs) {
+      if (run.finishedAt && ((now.getTime() - new Date(run.finishedAt).getTime()) > retentionMs)) {
         obj.db.remove('runs', run.id);
       }
-    }
+    });
 
-    for (const run of obj.db.list('runs')) {
-      if (run.status !== 'queued') continue;
-      if (run.nextEligibleAt && new Date(run.nextEligibleAt) > now) continue;
+    obj.db.list('runs').forEach(function (run) {
+      if (run.status !== 'queued') return;
+      if (run.nextEligibleAt && new Date(run.nextEligibleAt) > now) return;
       dispatchRun(run);
-    }
+    });
+  }
+
+  function getInventoryForNode(nodeid) {
+    return obj.db.get('inventory', nodeid);
   }
 
   function getApiData(nodeid) {
     const devices = getDevices();
     const jobs = expandedJobs();
-    const runs = obj.db.list('runs').sort((a, b) => String(b.updated || b.created).localeCompare(String(a.updated || a.created)));
-    const inventory = obj.db.list('inventory').sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+    const runs = obj.db.list('runs').sort(function (a, b) { return String(b.updated || b.created).localeCompare(String(a.updated || a.created)); });
+    const inventory = obj.db.list('inventory').sort(function (a, b) { return String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')); });
     return {
       ok: true,
       nodeid: nodeid || null,
-      devices,
-      jobs,
-      runs: nodeid ? runs.filter(x => x.nodeid === nodeid) : runs,
-      inventory: nodeid ? inventory.filter(x => x.nodeid === nodeid) : inventory,
+      devices: devices,
+      jobs: jobs,
+      runs: nodeid ? runs.filter(function (x) { return x.nodeid === nodeid; }) : runs,
+      inventory: nodeid ? inventory.filter(function (x) { return x.nodeid === nodeid; }) : inventory,
       adapter: obj.adapter.describe(),
       stats: {
         jobs: jobs.length,
         devices: devices.length,
-        queuedRuns: runs.filter(r => r.status === 'queued').length,
-        runningRuns: runs.filter(r => r.status === 'running').length,
-        failedRuns: runs.filter(r => r.status === 'failed').length
+        queuedRuns: runs.filter(function (r) { return r.status === 'queued'; }).length,
+        runningRuns: runs.filter(function (r) { return r.status === 'running'; }).length,
+        failedRuns: runs.filter(function (r) { return r.status === 'failed'; }).length
       }
     };
   }
@@ -280,10 +295,10 @@ module.exports.sworch = function (parent) {
   }
 
   function parseBody(req) {
-    return new Promise((resolve, reject) => {
+    return new Promise(function (resolve, reject) {
       let body = '';
-      req.on('data', (d) => { body += d.toString('utf8'); });
-      req.on('end', () => {
+      req.on('data', function (chunk) { body += chunk.toString('utf8'); });
+      req.on('end', function () {
         if (!body) return resolve({});
         try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
       });
@@ -291,130 +306,113 @@ module.exports.sworch = function (parent) {
     });
   }
 
-  function renderShell(title, mode, body, extraScript) {
-    return `<!doctype html>
-<html><head><meta charset="utf-8"><title>${escHtml(title)}</title>
-<style>
-:root{--bg:#14181e;--bg2:#1c222b;--panel:#1b2129;--panel2:#10151b;--line:#323a45;--text:#f0f3f7;--muted:#9aa6b2;--blue:#1a8cff;--green:#4caf50;--red:#d9534f;--amber:#ffb23f}
-*{box-sizing:border-box}body{font-family:Segoe UI,Arial,Helvetica,sans-serif;margin:0;background:var(--bg);color:var(--text)}
-.page{padding:18px}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,.18)}
-header.card{padding:16px 18px;margin-bottom:16px}.title{font-size:34px;color:#6dc2ff;font-weight:300}.subtitle{margin-top:6px;color:var(--muted)}
-.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.grid{display:grid;gap:16px}.two{grid-template-columns:1.2fr .8fr}.three{grid-template-columns:repeat(3,minmax(0,1fr))}
-.section{padding:16px}.section h2,.section h3{margin:0 0 14px}.label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}.input,.select,.textarea{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:10px}
-.textarea{min-height:170px;resize:vertical}.row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.row4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.hidden{display:none !important}
-.btn{background:var(--blue);color:#fff;border:0;border-radius:6px;padding:10px 14px;font-weight:600;cursor:pointer}.btn.secondary{background:#2a3340}.btn.warn{background:var(--red)}.btn.good{background:var(--green)}.btn:disabled{opacity:.55;cursor:not-allowed}
-.status-pill{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:700}.st-queued{background:#594414;color:#ffde8a}.st-running{background:#11405b;color:#8cd4ff}.st-success{background:#1e5125;color:#aff0b3}.st-failed,.st-expired{background:#5b1a1a;color:#ffadad}
-.stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}.stat{padding:14px}.stat .k{font-size:12px;color:var(--muted);text-transform:uppercase}.stat .v{font-size:28px;font-weight:700;margin-top:6px}
-.list{width:100%;border-collapse:collapse}.list th,.list td{border-bottom:1px solid var(--line);padding:10px 8px;text-align:left;font-size:13px;vertical-align:top}.list th{font-size:12px;text-transform:uppercase;color:var(--muted)}
-.list tr.active{background:#0e314e}.jobs tbody tr{cursor:pointer}.mono{font-family:Consolas,monospace;white-space:pre-wrap}.muted{color:var(--muted)}.ok{color:#9de0a0}.bad{color:#ff9e9e}
-.flex{display:flex;gap:10px;align-items:center}.space{justify-content:space-between}.search{min-width:220px}.scroll{max-height:420px;overflow:auto}.chkcell{width:34px}.small{font-size:12px}
-.schedule-box{padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel2)}
-#log{max-height:280px;overflow:auto;background:var(--panel2);border:1px solid var(--line);padding:10px;border-radius:6px}
-</style></head><body data-mode="${escHtml(mode)}"><div class="page">${body}</div><script>
-const apiBase = '/pluginadmin.ashx?pin=sworch&${mode}=1';
-async function apiGet(q){ const r=await fetch(apiBase+'&api='+q,{credentials:'same-origin'}); return r.json(); }
-async function apiPost(q,body){ const r=await fetch(apiBase+'&api='+q,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(body||{})}); return r.json(); }
-function esc(v){ return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function statusClass(s){ return 'st-'+String(s||'').toLowerCase(); }
-function fmtSchedule(s){ if(!s||!s.mode||s.mode==='manual') return 'Manuell'; if(s.mode==='onConnect') return 'Beim Onlinegehen'; if(s.mode==='interval') return 'Alle '+(s.intervalMinutes||60)+' Minuten'; if(s.mode==='daily') return 'Taeglich '+String(s.hour||0).padStart(2,'0')+':'+String(s.minute||0).padStart(2,'0'); if(s.mode==='weekly') return 'Woechentlich ('+(s.weekdays||[]).join(', ')+') '+String(s.hour||0).padStart(2,'0')+':'+String(s.minute||0).padStart(2,'0'); if(s.mode==='once') return s.runAt||'Einmalig'; return s.mode; }
-${extraScript || ''}
-</script></body></html>`;
+  function shellHtml(title, mode, body, extraJs) {
+    return '<!doctype html><html><head><meta charset="utf-8"><title>' + esc(title) + '</title>' +
+      '<style>' +
+      'body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#121519;color:#e7edf5}' +
+      '.top{padding:18px 22px;border-bottom:1px solid #2c3138;background:#171b20}.title{font-size:36px;color:#57b4ff;font-weight:300}' +
+      '.wrap{padding:18px 20px}.layout{display:grid;grid-template-columns:460px 1fr;gap:16px}.card{background:#171b20;border:1px solid #31363d;border-radius:4px;overflow:hidden}' +
+      '.card h2{margin:0;padding:12px 14px;border-bottom:1px solid #2b3037;font-size:16px;font-weight:600}.section{padding:12px 14px}.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 14px;border-bottom:1px solid #2b3037}' +
+      'button{background:#0f84d8;color:#fff;border:0;border-radius:2px;padding:9px 14px;cursor:pointer;font:inherit}button.alt{background:#2b3037}button.danger{background:#b72d2d}button.small{padding:6px 10px;font-size:12px}' +
+      'input,select,textarea{width:100%;box-sizing:border-box;background:#101317;color:#eef4ff;border:1px solid #3b424b;border-radius:2px;padding:9px 10px;font:inherit}' +
+      'textarea{min-height:240px;resize:vertical}.muted{color:#9eabb8}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}' +
+      '.joblist{height:650px;overflow:auto}.jobrow{padding:10px 12px;border-top:1px solid #242930;cursor:pointer}.jobrow:first-child{border-top:0}.jobrow.active{background:#0a6fb0}.jobrow .name{font-weight:600}.jobrow .meta{font-size:12px;color:#b7c4d3;margin-top:4px}' +
+      '.status{display:inline-block;min-width:90px;text-align:center;padding:4px 8px;border-radius:2px;font-weight:600}.status-ok{background:#58a526;color:#fff}.status-queued{background:#b47d0b;color:#fff}.status-running{background:#0f84d8;color:#fff}.status-failed{background:#b72d2d;color:#fff}.status-idle{background:#47515c;color:#fff}' +
+      'table{width:100%;border-collapse:collapse}th,td{padding:9px 10px;border-top:1px solid #252a31;text-align:left;font-size:13px;vertical-align:top}th{color:#9eb0c2;font-size:12px;background:#121519;position:sticky;top:0}' +
+      '.split{display:grid;grid-template-columns:1fr 1fr;gap:16px}.scroll{max-height:310px;overflow:auto}.choice{display:flex;align-items:center;gap:8px;padding:6px 4px;border-top:1px solid #242930}.choice:first-child{border-top:0}.pill{display:inline-block;background:#2b3037;padding:3px 8px;border-radius:999px;margin-right:4px;font-size:12px}.hidden{display:none !important}' +
+      '.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:16px}.stat{background:#171b20;border:1px solid #31363d;border-radius:4px;padding:12px 14px}.stat .v{font-size:28px;color:#57b4ff;font-weight:300;margin-top:8px}' +
+      '.hint{font-size:12px;color:#97a6b6}.mono{font-family:Consolas,monospace;white-space:pre-wrap}' +
+      '</style></head><body data-mode="' + esc(mode) + '"><div class="top"><div class="title">Software Orchestrator</div></div><div class="wrap">' + body + '</div><script>' +
+      'function qp(o){return new URLSearchParams(o).toString();}' +
+      'async function apiGet(api, extra){var p={pin:"sworch",api:api};if(document.body.dataset.mode==="admin"){p.admin=1;}else{p.user=1;} if(extra){for(var k in extra){p[k]=extra[k];}} var r=await fetch("/pluginadmin.ashx?"+qp(p),{credentials:"same-origin"}); return r.json();}' +
+      'async function apiPost(api, body, extra){var p={pin:"sworch",api:api};if(document.body.dataset.mode==="admin"){p.admin=1;}else{p.user=1;} if(extra){for(var k in extra){p[k]=extra[k];}} var r=await fetch("/pluginadmin.ashx?"+qp(p),{method:"POST",headers:{"Content-Type":"application/json"},credentials:"same-origin",body:JSON.stringify(body||{})}); return r.json();}' +
+      'function statusClass(s){if(s==="success") return "status-ok"; if(s==="queued") return "status-queued"; if(s==="running") return "status-running"; if(s==="failed") return "status-failed"; return "status-idle";}' +
+      'function fmtSchedule(s){if(!s||!s.mode||s.mode==="manual") return "Manuell"; if(s.mode==="onConnect") return "Beim Onlinegehen"; if(s.mode==="interval") return "Alle "+(s.intervalMinutes||60)+" Min."; if(s.mode==="daily") return "Täglich "+String(s.hour||0).padStart(2,"0")+":"+String(s.minute||0).padStart(2,"0"); if(s.mode==="weekly") return "Wöchentlich "+(s.weekdays||[]).join(",")+" "+String(s.hour||0).padStart(2,"0")+":"+String(s.minute||0).padStart(2,"0"); if(s.mode==="once") return s.runAt||"Einmalig"; return s.mode;}' +
+      extraJs + '</script></body></html>';
   }
 
   function renderAdminPage() {
-    const body = `
-<header class="card"><div class="title">Jobs</div><div class="subtitle">Zuweisen, planen und in der Warteschlange halten, bis Agents online sind.</div></header>
-<div class="stats" id="stats"></div>
-<div class="grid two" style="margin-top:16px">
-  <div class="card section">
-    <div class="toolbar space"><h2>Job-Uebersicht</h2><div class="toolbar"><input id="jobFilter" class="input search" placeholder="Eintraege filtern"><button class="btn secondary" onclick="newJob()">Neuer Job</button><button class="btn secondary" onclick="reloadAll()">Aktualisieren</button></div></div>
-    <div class="scroll"><table class="list jobs"><thead><tr><th></th><th>Job: Name</th><th>Plan</th><th>Letzte Aktion</th><th>Zustand</th></tr></thead><tbody id="jobsBody"></tbody></table></div>
-  </div>
-  <div class="card section">
-    <div class="toolbar space"><h2 id="editorTitle">Job anlegen</h2><div class="toolbar"><button class="btn good" onclick="saveJob()">Speichern</button><button class="btn secondary" onclick="queueEditedJob()">Jetzt queue'n</button><button class="btn warn" onclick="deleteJob()">Loeschen</button></div></div>
-    <div class="row"><div><label class="label">Name</label><input id="jobName" class="input"></div><div><label class="label">Skripttyp</label><select id="jobType" class="select"><option value="powershell">PowerShell</option><option value="shell">Shell / CMD</option></select></div></div>
-    <div style="margin-top:12px"><label class="label">Beschreibung</label><input id="jobDescription" class="input"></div>
-    <div style="margin-top:12px"><label class="label">Skript</label><textarea id="jobScript" class="textarea"></textarea></div>
-    <div style="margin-top:12px"><label class="label">Plan</label><select id="scheduleMode" class="select" onchange="toggleScheduleFields()"><option value="manual">Manuell</option><option value="onConnect">Beim Onlinegehen</option><option value="interval">Intervall</option><option value="daily">Taeglich</option><option value="weekly">Woechentlich</option><option value="once">Einmalig</option></select></div>
-    <div id="scheduleFields" class="schedule-box" style="margin-top:12px">
-      <div class="row4" id="rowInterval"><div><label class="label">Intervall Minuten</label><input id="intervalMinutes" class="input" type="number" min="1" value="60"></div></div>
-      <div class="row" id="rowTime" style="margin-top:10px"><div><label class="label">Stunde</label><input id="scheduleHour" class="input" type="number" min="0" max="23" value="18"></div><div><label class="label">Minute</label><input id="scheduleMinute" class="input" type="number" min="0" max="59" value="0"></div></div>
-      <div id="rowWeekly" style="margin-top:10px"><label class="label">Wochentage</label><div class="toolbar small"><label><input type="checkbox" class="weekday" value="1"> Mo</label><label><input type="checkbox" class="weekday" value="2"> Di</label><label><input type="checkbox" class="weekday" value="3"> Mi</label><label><input type="checkbox" class="weekday" value="4"> Do</label><label><input type="checkbox" class="weekday" value="5"> Fr</label><label><input type="checkbox" class="weekday" value="6"> Sa</label><label><input type="checkbox" class="weekday" value="0"> So</label></div></div>
-      <div id="rowOnce" style="margin-top:10px"><label class="label">Ausfuehren am (ISO/UTC)</label><input id="scheduleOnce" class="input" placeholder="2026-03-30T18:00:00.000Z"></div>
-    </div>
-    <div style="margin-top:16px"><label class="label">Zielgeraete</label><div class="toolbar" style="margin-bottom:8px"><input id="deviceFilter" class="input search" placeholder="Geraete filtern"><button class="btn secondary" onclick="selectVisibleDevices(true)">Alle sichtbaren</button><button class="btn secondary" onclick="selectVisibleDevices(false)">Keine</button></div><div class="scroll"><table class="list"><thead><tr><th class="chkcell"></th><th>Geraet</th><th>Plattform</th><th>Status</th></tr></thead><tbody id="devicesBody"></tbody></table></div></div>
-    <div class="small muted" id="saveResult" style="margin-top:10px"></div>
-  </div>
-</div>
-<div class="grid two" style="margin-top:16px">
-  <div class="card section"><div class="toolbar space"><h2>Queue</h2><div class="toolbar"><button class="btn secondary" onclick="refreshQueue()">Aktualisieren</button></div></div><div class="scroll"><table class="list"><thead><tr><th>Geraet</th><th>Job</th><th>Status</th><th>Letzte Aktion</th><th>Ausgabe</th></tr></thead><tbody id="runsBody"></tbody></table></div></div>
-  <div class="card section"><div class="toolbar space"><h2>Softwareinventar</h2><div class="toolbar"><button class="btn secondary" onclick="refreshInventories()">Online-Geraete abfragen</button></div></div><div class="scroll"><table class="list"><thead><tr><th>Geraet</th><th>Plattform</th><th>Pakete</th><th>Aktualisiert</th></tr></thead><tbody id="inventoryBody"></tbody></table></div><div id="log" style="margin-top:12px"></div></div>
-</div>`;
+    const body = '<div id="stats" class="stats"></div>' +
+      '<div class="layout">' +
+      '<div class="card"><div class="toolbar"><button onclick="newJob()">Neuer Job</button><button class="alt" onclick="refresh()">Aktualisieren</button><input id="jobSearch" placeholder="Einträge filtern" oninput="renderJobs()"></div><div id="jobs" class="joblist"></div></div>' +
+      '<div>' +
+      '<div class="card"><h2>Job bearbeiten</h2><div class="section">' +
+      '<div class="grid2"><div><label>Name</label><input id="f_name"></div><div><label>Ordner</label><input id="f_folder" placeholder="z.B. 03. Software & Runtimes"></div></div>' +
+      '<div class="grid2" style="margin-top:12px"><div><label>Skripttyp</label><select id="f_type"><option value="powershell">PowerShell</option><option value="shell">Shell/BAT</option></select></div><div><label>Plan</label><select id="f_mode" onchange="updateScheduleFields()"><option value="manual">Manuell</option><option value="onConnect">Beim Onlinegehen</option><option value="interval">Intervall</option><option value="daily">Täglich</option><option value="weekly">Wöchentlich</option><option value="once">Einmalig</option></select></div></div>' +
+      '<div class="grid3" id="schedule_interval" style="margin-top:12px"><div><label>Intervall in Minuten</label><input id="f_interval" type="number" min="1" value="60"></div><div></div><div></div></div>' +
+      '<div class="grid3 hidden" id="schedule_clock" style="margin-top:12px"><div><label>Stunde</label><input id="f_hour" type="number" min="0" max="23" value="18"></div><div><label>Minute</label><input id="f_minute" type="number" min="0" max="59" value="0"></div><div id="weekly_wrap" class="hidden"><label>Wochentage (0-6)</label><input id="f_weekdays" value="1,2,3,4,5"></div></div>' +
+      '<div class="hidden" id="schedule_once" style="margin-top:12px"><label>Ausführungszeit (ISO, UTC)</label><input id="f_runAt" placeholder="2026-03-30T18:00:00.000Z"></div>' +
+      '<div style="margin-top:12px"><label>Beschreibung</label><input id="f_description"></div>' +
+      '<div style="margin-top:12px"><label>Skript</label><textarea id="f_script"></textarea></div>' +
+      '<div class="split" style="margin-top:12px"><div><label>Gerätefilter</label><input id="deviceFilter" placeholder="Name filtern" oninput="renderDeviceChoices()"><div class="scroll card" style="margin-top:6px;padding:0;border-radius:2px"><div id="deviceChoices" class="section"></div></div></div>' +
+      '<div><label>Zuordnung</label><div class="hint" style="margin-bottom:8px">Mehrfachauswahl per Checkbox. Offline-Geräte bleiben serverseitig in der Warteschlange.</div><div id="selectedSummary" class="hint"></div><div style="margin-top:16px"><label>Aktueller Status</label><div id="jobStatus" class="hint">Noch kein Job gewählt.</div></div></div></div>' +
+      '<div class="toolbar" style="padding-left:0;padding-right:0;border-bottom:0;margin-top:10px"><button onclick="saveJob()">Speichern</button><button class="alt" onclick="queueSelected()">Jetzt ausführen</button><button class="danger" onclick="deleteSelected()">Löschen</button><span id="msg" class="hint"></span></div>' +
+      '</div></div>' +
+      '<div class="card" style="margin-top:16px"><h2>Warteschlange / Verlauf</h2><div id="runs" class="scroll"></div></div>' +
+      '<div class="card" style="margin-top:16px"><div class="toolbar"><strong>Softwareinventar</strong><button class="alt small" onclick="refreshInventoryAll()">Online-Geräte aktualisieren</button><span id="invMsg" class="hint"></span></div><div id="inventory" class="scroll"></div></div>' +
+      '</div></div>';
 
-    const script = `
-let state = { devices: [], jobs: [], runs: [], inventory: [], stats: {} };
+    const js = `
+let state = { jobs: [], devices: [], runs: [], inventory: [], stats: {} };
 let selectedJobId = null;
-function log(msg){ const el=document.getElementById('log'); const line=document.createElement('div'); line.textContent='['+new Date().toLocaleTimeString()+'] '+msg; el.prepend(line); }
-function selectedDeviceIds(){ return Array.from(document.querySelectorAll('#devicesBody input[type=checkbox]:checked')).map(x=>x.value); }
-function visibleDeviceRows(){ return Array.from(document.querySelectorAll('#devicesBody tr')).filter(tr=>tr.style.display!=='none'); }
-function getSchedule(){ const mode=document.getElementById('scheduleMode').value; const s={mode:mode}; if(mode==='interval'){ s.intervalMinutes=Number(document.getElementById('intervalMinutes').value||60); } if(mode==='daily'||mode==='weekly'){ s.hour=Number(document.getElementById('scheduleHour').value||0); s.minute=Number(document.getElementById('scheduleMinute').value||0); } if(mode==='weekly'){ s.weekdays=Array.from(document.querySelectorAll('.weekday:checked')).map(x=>Number(x.value)); } if(mode==='once'){ s.runAt=document.getElementById('scheduleOnce').value||null; } return s; }
-function toggleScheduleFields(){ const mode=document.getElementById('scheduleMode').value; document.getElementById('rowInterval').classList.toggle('hidden', mode!=='interval'); document.getElementById('rowTime').classList.toggle('hidden', !(mode==='daily'||mode==='weekly')); document.getElementById('rowWeekly').classList.toggle('hidden', mode!=='weekly'); document.getElementById('rowOnce').classList.toggle('hidden', mode!=='once'); document.getElementById('scheduleFields').classList.toggle('hidden', mode==='manual'||mode==='onConnect'); }
-function applyFilters(){ const jf=(document.getElementById('jobFilter').value||'').toLowerCase(); Array.from(document.querySelectorAll('#jobsBody tr')).forEach(tr=>{ tr.style.display=tr.dataset.search.includes(jf)?'':'none'; }); const df=(document.getElementById('deviceFilter').value||'').toLowerCase(); Array.from(document.querySelectorAll('#devicesBody tr')).forEach(tr=>{ tr.style.display=tr.dataset.search.includes(df)?'':'none'; }); }
-function renderStats(){ const s=state.stats||{}; const vals=[['Jobs',s.jobs||0],['Geraete',s.devices||0],['Queued',s.queuedRuns||0],['Running',s.runningRuns||0],['Fehler',s.failedRuns||0]]; document.getElementById('stats').innerHTML=vals.map(v=>'<div class="card stat"><div class="k">'+v[0]+'</div><div class="v">'+v[1]+'</div></div>').join(''); }
-function renderJobs(){ const tbody=document.getElementById('jobsBody'); tbody.innerHTML=state.jobs.map((j,i)=>{ const status=j.failed>0?'Fehler':(j.running>0?'Laufend':(j.queued>0?'Geplant':'OK')); const cls=status==='Fehler'?'st-failed':(status==='Laufend'?'st-running':(status==='Geplant'?'st-queued':'st-success')); return '<tr data-id="'+j.id+'" data-search="'+esc((j.name+' '+(j.description||'')).toLowerCase())+'" class="'+(j.id===selectedJobId?'active':'')+'" onclick="pickJob(\''+j.id+'\')"><td>'+(i+1)+'</td><td><strong>'+esc(j.name)+'</strong><div class="muted small">'+esc(j.description||'')+'</div></td><td>'+esc(fmtSchedule(j.schedule))+'</td><td>'+(j.lastRunAt?esc(j.lastRunAt):'<span class="muted">Noch nie</span>')+'</td><td><span class="status-pill '+cls+'">'+status+'</span></td></tr>'; }).join(''); applyFilters(); }
-function renderDevices(){ const selected=new Set(selectedDeviceIds()); document.getElementById('devicesBody').innerHTML=state.devices.map(d=>'<tr data-search="'+esc((d.name+' '+(d.platform||'')).toLowerCase())+'"><td class="chkcell"><input type="checkbox" value="'+d.nodeid+'" '+(selected.has(d.nodeid)?'checked':'')+'></td><td>'+esc(d.name)+'</td><td>'+esc(d.platform||'')+'</td><td>'+(d.online?'<span class="status-pill st-success">Online</span>':'<span class="status-pill st-failed">Offline</span>')+'</td></tr>').join(''); applyFilters(); }
-function renderRuns(){ document.getElementById('runsBody').innerHTML=state.runs.slice(0,80).map(r=>'<tr><td>'+esc(r.nodeName||r.nodeid)+'</td><td>'+esc(r.scriptName||'')+'</td><td><span class="status-pill '+statusClass(r.status)+'">'+esc(r.status||'')+'</span></td><td>'+(r.updated?esc(r.updated):'')+'</td><td><details><summary>anzeigen</summary><div class="mono">'+esc((r.stdout||'')+(r.stderr?'\nERR:\n'+r.stderr:''))+'</div></details></td></tr>').join(''); }
-function renderInventory(){ document.getElementById('inventoryBody').innerHTML=state.inventory.slice(0,80).map(i=>'<tr><td>'+esc(i.nodeName||i.nodeid)+'</td><td>'+esc(i.platform||'')+'</td><td>'+((i.packages||[]).length)+'</td><td>'+(i.updatedAt?esc(i.updatedAt):'')+'</td></tr>').join(''); }
-function fillEditor(job){ document.getElementById('editorTitle').textContent=job&&job.id?'Job bearbeiten':'Job anlegen'; document.getElementById('jobName').value=job&&job.name||''; document.getElementById('jobType').value=job&&job.scriptType||'powershell'; document.getElementById('jobDescription').value=job&&job.description||''; document.getElementById('jobScript').value=job&&job.scriptBody||''; const s=job&&job.schedule||{mode:'manual'}; document.getElementById('scheduleMode').value=s.mode||'manual'; document.getElementById('intervalMinutes').value=s.intervalMinutes||60; document.getElementById('scheduleHour').value=s.hour==null?18:s.hour; document.getElementById('scheduleMinute').value=s.minute==null?0:s.minute; document.getElementById('scheduleOnce').value=s.runAt||''; Array.from(document.querySelectorAll('.weekday')).forEach(x=>{ x.checked=(s.weekdays||[]).includes(Number(x.value)); }); const assigned=new Set(job&&job.nodeIds||[]); Array.from(document.querySelectorAll('#devicesBody input[type=checkbox]')).forEach(x=>{ x.checked=assigned.has(x.value); }); toggleScheduleFields(); }
-function newJob(){ selectedJobId=null; fillEditor(null); renderJobs(); document.getElementById('saveResult').textContent=''; }
-function pickJob(id){ selectedJobId=id; const job=state.jobs.find(x=>x.id===id); renderJobs(); fillEditor(job); }
-function selectVisibleDevices(flag){ visibleDeviceRows().forEach(tr=>{ const cb=tr.querySelector('input[type=checkbox]'); if(cb) cb.checked=flag; }); }
-async function reloadAll(){ state=await apiGet('data'); renderStats(); renderDevices(); renderJobs(); renderRuns(); renderInventory(); if(selectedJobId){ const job=state.jobs.find(x=>x.id===selectedJobId); fillEditor(job||null); if(!job) selectedJobId=null; } else { fillEditor(null); } }
-async function saveJob(enqueue){ const name=document.getElementById('jobName').value.trim(); const script=document.getElementById('jobScript').value; const deviceIds=selectedDeviceIds(); if(!name){ document.getElementById('saveResult').textContent='Bitte zuerst einen Namen vergeben.'; return; } if(!script.trim()){ document.getElementById('saveResult').textContent='Bitte ein Skript hinterlegen.'; return; } if(deviceIds.length===0){ document.getElementById('saveResult').textContent='Bitte mindestens ein Zielgeraet auswaehlen.'; return; } const payload={ id:selectedJobId, name:name, description:document.getElementById('jobDescription').value.trim(), scriptType:document.getElementById('jobType').value, scriptBody:script, schedule:getSchedule(), targetNodeIds:deviceIds, enqueueNow:!!enqueue }; const r=await apiPost('saveJob',payload); if(!r.ok){ document.getElementById('saveResult').textContent='Fehler: '+(r.error||'unbekannt'); return; } selectedJobId=r.job.id; document.getElementById('saveResult').textContent='Job gespeichert.'; log('Job "'+r.job.name+'" gespeichert.'); await reloadAll(); }
-async function queueEditedJob(){ if(!selectedJobId){ document.getElementById('saveResult').textContent='Bitte den Job erst speichern.'; return; } const r=await apiPost('queueJobs',{jobIds:[selectedJobId],reason:'manual-ui'}); if(r.ok){ log('Job in die Warteschlange gestellt.'); await reloadAll(); } }
-async function deleteJob(){ if(!selectedJobId) return; if(!confirm('Diesen Job wirklich loeschen?')) return; const r=await apiPost('deleteJob',{id:selectedJobId}); if(r.ok){ log('Job geloescht.'); selectedJobId=null; await reloadAll(); } }
-async function refreshQueue(){ await reloadAll(); }
-async function refreshInventories(){ const r=await apiPost('refreshInventoryAll',{}); log(r.ok ? ('Inventar fuer '+(r.sent||0)+' Online-Geraete angefragt.') : 'Inventar-Anfrage fehlgeschlagen.'); setTimeout(reloadAll,1500); }
-document.getElementById('jobFilter').addEventListener('input',applyFilters); document.getElementById('deviceFilter').addEventListener('input',applyFilters); reloadAll(); setInterval(refreshQueue,30000);`;
-
-    return renderShell('Software Orchestrator', 'admin', body, script);
+function blankJob(){ return { id:'', name:'', folder:'', description:'', scriptType:'powershell', scriptBody:'', schedule:{mode:'manual'}, nodeIds:[] }; }
+function getSelectedJob(){ return state.jobs.find(j => j.id === selectedJobId) || blankJob(); }
+function byFolderThenName(a,b){ return String(a.folder||'').localeCompare(String(b.folder||''),'de') || String(a.name||'').localeCompare(String(b.name||''),'de'); }
+function renderStats(){ var s=state.stats||{}; var names=['Jobs','Geräte','Queued','Running','Fehler']; var vals=[s.jobs||0,s.devices||0,s.queuedRuns||0,s.runningRuns||0,s.failedRuns||0]; document.getElementById('stats').innerHTML = names.map((n,i)=>'<div class="stat"><div class="muted">'+n+'</div><div class="v">'+vals[i]+'</div></div>').join(''); }
+function renderJobs(){ var q=(document.getElementById('jobSearch').value||'').toLowerCase(); var html=''; var jobs=(state.jobs||[]).slice().sort(byFolderThenName).filter(j=>!q || (j.name||'').toLowerCase().includes(q) || (j.folder||'').toLowerCase().includes(q)); if(!jobs.length){ html='<div class="section muted">Keine Jobs vorhanden.</div>'; } else { jobs.forEach(function(j){ var cls=j.id===selectedJobId?'jobrow active':'jobrow'; var status=''; if(j.failed>0){status='Fehler';} else if(j.running>0){status='Läuft';} else if(j.queued>0){status='Geplant';} else if(j.success>0){status='OK';} else {status='Neu';} html += '<div class="'+cls+'" onclick="selectJob('+JSON.stringify(j.id)+')"><div class="name">'+escapeHtml(j.name||'Neuer Job')+'</div><div class="meta">'+escapeHtml(j.folder||'Ohne Ordner')+' · '+escapeHtml(fmtSchedule(j.schedule))+' · '+j.assignedCount+' Gerät(e)</div><div class="meta"><span class="status '+statusClass(j.failed>0?'failed':(j.running>0?'running':(j.queued>0?'queued':(j.success>0?'success':'idle'))))+'">'+status+'</span></div></div>'; }); }
+ document.getElementById('jobs').innerHTML = html; }
+function renderRuns(){ var rows=(state.runs||[]).slice(0,80).map(function(r){ return '<tr><td>'+escapeHtml(r.nodeName||r.nodeid)+'</td><td>'+escapeHtml(r.scriptName||'')+'</td><td><span class="status '+statusClass(r.status)+'">'+escapeHtml(r.status||'')+'</span></td><td>'+escapeHtml(r.updated||r.created||'')+'</td><td><details><summary>Ausgabe</summary><div class="mono">'+escapeHtml((r.stdout||'') + ((r.stderr||'') ? '\nERR:\n' + r.stderr : ''))+'</div></details></td></tr>'; }).join(''); document.getElementById('runs').innerHTML='<table><thead><tr><th>Gerät</th><th>Job</th><th>Status</th><th>Letzte Aktion</th><th>Zustandsmeldung</th></tr></thead><tbody>'+rows+'</tbody></table>'; }
+function renderInventory(){ var rows=(state.inventory||[]).slice(0,100).map(function(i){ return '<tr><td>'+escapeHtml(i.nodeName||i.nodeid)+'</td><td>'+escapeHtml(i.platform||'')+'</td><td>'+(i.packages?i.packages.length:0)+'</td><td>'+escapeHtml(i.updatedAt||'')+'</td></tr>'; }).join(''); document.getElementById('inventory').innerHTML='<table><thead><tr><th>Gerät</th><th>Plattform</th><th>Software</th><th>Aktualisiert</th></tr></thead><tbody>'+rows+'</tbody></table>'; }
+function updateScheduleFields(){ var mode=document.getElementById('f_mode').value; document.getElementById('schedule_interval').classList.toggle('hidden', mode!=='interval'); document.getElementById('schedule_clock').classList.toggle('hidden', !(mode==='daily'||mode==='weekly')); document.getElementById('weekly_wrap').classList.toggle('hidden', mode!=='weekly'); document.getElementById('schedule_once').classList.toggle('hidden', mode!=='once'); }
+function fillForm(job){ job=job||blankJob(); document.getElementById('f_name').value=job.name||''; document.getElementById('f_folder').value=job.folder||''; document.getElementById('f_description').value=job.description||''; document.getElementById('f_type').value=job.scriptType||'powershell'; document.getElementById('f_script').value=job.scriptBody||''; var s=job.schedule||{mode:'manual'}; document.getElementById('f_mode').value=s.mode||'manual'; document.getElementById('f_interval').value=s.intervalMinutes||60; document.getElementById('f_hour').value=(s.hour==null?18:s.hour); document.getElementById('f_minute').value=(s.minute==null?0:s.minute); document.getElementById('f_weekdays').value=(s.weekdays||[1,2,3,4,5]).join(','); document.getElementById('f_runAt').value=s.runAt||''; updateScheduleFields(); renderDeviceChoices(job.nodeIds||[]); document.getElementById('jobStatus').textContent = job.id ? ('ID: '+job.id+' · '+fmtSchedule(job.schedule)+' · '+(job.assignedCount||0)+' Gerät(e)') : 'Neuer, noch nicht gespeicherter Job.'; }
+function renderDeviceChoices(selected){ selected = selected || getCheckedNodes(); var q=(document.getElementById('deviceFilter').value||'').toLowerCase(); var html=''; (state.devices||[]).filter(function(d){ return !q || (d.name||'').toLowerCase().includes(q); }).forEach(function(d){ var checked = selected.indexOf(d.nodeid)>=0 ? 'checked' : ''; html += '<label class="choice"><input type="checkbox" class="nodecb" value="'+d.nodeid+'" '+checked+'> <span>'+escapeHtml(d.name)+'</span> <span class="muted">'+(d.online?'online':'offline')+'</span></label>'; }); document.getElementById('deviceChoices').innerHTML = html || '<div class="muted">Keine Geräte gefunden.</div>'; updateSelectedSummary(); }
+function getCheckedNodes(){ return Array.from(document.querySelectorAll('.nodecb:checked')).map(function(x){ return x.value; }); }
+function updateSelectedSummary(){ var s=getCheckedNodes(); document.getElementById('selectedSummary').textContent = s.length ? (s.length + ' Gerät(e) ausgewählt') : 'Kein Gerät ausgewählt'; }
+document.addEventListener('change', function(e){ if(e.target && e.target.classList.contains('nodecb')) updateSelectedSummary(); });
+function currentSchedule(){ var mode=document.getElementById('f_mode').value; var s={mode:mode}; if(mode==='interval'){ s.intervalMinutes=Number(document.getElementById('f_interval').value||60); } if(mode==='daily' || mode==='weekly'){ s.hour=Number(document.getElementById('f_hour').value||0); s.minute=Number(document.getElementById('f_minute').value||0); } if(mode==='weekly'){ s.weekdays=(document.getElementById('f_weekdays').value||'').split(',').map(function(x){ return Number(x.trim()); }).filter(function(x){ return !Number.isNaN(x); }); } if(mode==='once'){ s.runAt=document.getElementById('f_runAt').value||null; } return s; }
+function escapeHtml(v){ return String(v==null?'':v).replace(/[&<>"']/g,function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]; }); }
+function selectJob(id){ selectedJobId=id; renderJobs(); fillForm(state.jobs.find(j=>j.id===id)); }
+function newJob(){ selectedJobId=''; fillForm(blankJob()); renderJobs(); document.getElementById('msg').textContent=''; }
+async function refresh(){ state = await apiGet('data'); renderStats(); renderJobs(); renderRuns(); renderInventory(); if(selectedJobId && !state.jobs.find(j=>j.id===selectedJobId)) selectedJobId=''; fillForm(selectedJobId ? state.jobs.find(j=>j.id===selectedJobId) : blankJob()); }
+async function saveJob(){ var payload = { id:selectedJobId||'', name:document.getElementById('f_name').value||'Neuer Job', folder:document.getElementById('f_folder').value||'', description:document.getElementById('f_description').value||'', scriptType:document.getElementById('f_type').value, scriptBody:document.getElementById('f_script').value||'', schedule:currentSchedule(), targetNodeIds:getCheckedNodes() }; var r = await apiPost('saveJob', payload); document.getElementById('msg').textContent = r.ok ? 'Gespeichert' : ('Fehler: ' + (r.error||'')); if(r.ok){ selectedJobId = r.job.id; await refresh(); } }
+async function queueSelected(){ if(!selectedJobId){ document.getElementById('msg').textContent='Bitte zuerst einen gespeicherten Job wählen.'; return; } var r = await apiPost('queueJobs', { jobIds:[selectedJobId], nodeIds:getCheckedNodes() }); document.getElementById('msg').textContent = r.ok ? 'Zur Warteschlange hinzugefügt' : ('Fehler: ' + (r.error||'')); if(r.ok) refresh(); }
+async function deleteSelected(){ if(!selectedJobId){ document.getElementById('msg').textContent='Kein Job ausgewählt.'; return; } if(!confirm('Job wirklich löschen?')) return; var r = await apiPost('deleteJob', { id:selectedJobId }); document.getElementById('msg').textContent = r.ok ? 'Gelöscht' : ('Fehler: ' + (r.error||'')); if(r.ok){ selectedJobId=''; refresh(); } }
+async function refreshInventoryAll(){ var r = await apiPost('refreshInventoryAll', {}); document.getElementById('invMsg').textContent = r.ok ? ('Anfragen gesendet: ' + (r.sent||0)) : ('Fehler: ' + (r.error||'')); }
+refresh(); setInterval(refresh, 30000);
+`;
+    return shellHtml('Software Orchestrator', 'admin', body, js);
   }
 
   function renderUserPage(nodeid) {
-    const safeNodeId = escHtml(nodeid || '');
-    const body = `
-<header class="card"><div class="title">Softwareinventar und Jobs</div><div class="subtitle">Geraet: <span class="mono">${safeNodeId}</span></div></header>
-<div class="grid two">
-  <div class="card section"><div class="toolbar space"><h2>Zugewiesene Jobs</h2><button class="btn secondary" onclick="reloadAll()">Aktualisieren</button></div><div class="scroll"><table class="list"><thead><tr><th>Job</th><th>Plan</th><th>Aktion</th></tr></thead><tbody id="jobsBody"></tbody></table></div></div>
-  <div class="card section"><div class="toolbar space"><h2>Softwareinventar</h2><button class="btn secondary" onclick="refreshInventory()">Inventar aktualisieren</button></div><div class="scroll" id="inventoryWrap"></div></div>
-</div>
-<div class="card section" style="margin-top:16px"><h2>Letzte Runs</h2><div class="scroll"><table class="list"><thead><tr><th>Job</th><th>Status</th><th>Zeit</th><th>Ausgabe</th></tr></thead><tbody id="runsBody"></tbody></table></div></div>`;
-
-    const script = `
-const nodeid=${JSON.stringify(nodeid||'')};
-let state={};
-async function reloadAll(){ state=await apiGet('data&nodeid='+encodeURIComponent(nodeid)); renderJobs(); renderInventory(); renderRuns(); }
-function renderJobs(){ const jobs=(state.jobs||[]).filter(j=>(j.nodeIds||[]).includes(nodeid)); document.getElementById('jobsBody').innerHTML=jobs.length?jobs.map(j=>'<tr><td><strong>'+esc(j.name)+'</strong><div class="muted small">'+esc(j.description||'')+'</div></td><td>'+esc(fmtSchedule(j.schedule))+'</td><td><button class="btn" onclick="queueJob(\''+j.id+'\')">Jetzt ausfuehren</button></td></tr>').join(''):'<tr><td colspan="3" class="muted">Keine Jobs zugewiesen.</td></tr>'; }
-function renderInventory(){ const inv=(state.inventory||[])[0]; if(!inv){ document.getElementById('inventoryWrap').innerHTML='<div class="muted">Noch kein Inventar vorhanden.</div>'; return; } document.getElementById('inventoryWrap').innerHTML='<div class="muted" style="margin-bottom:8px">Aktualisiert: '+esc(inv.updatedAt||'')+'</div><table class="list"><thead><tr><th>Name</th><th>Version</th><th>Hersteller</th></tr></thead><tbody>'+ (inv.packages||[]).slice(0,500).map(p=>'<tr><td>'+esc(p.name||p.DisplayName||'')+'</td><td>'+esc(p.version||p.DisplayVersion||'')+'</td><td>'+esc(p.publisher||p.Publisher||'')+'</td></tr>').join('') +'</tbody></table>'; }
-function renderRuns(){ document.getElementById('runsBody').innerHTML=(state.runs||[]).slice(0,30).map(r=>'<tr><td>'+esc(r.scriptName||'')+'</td><td><span class="status-pill '+statusClass(r.status)+'">'+esc(r.status||'')+'</span></td><td>'+esc(r.updated||r.created||'')+'</td><td><details><summary>anzeigen</summary><div class="mono">'+esc((r.stdout||'')+(r.stderr?'\nERR:\n'+r.stderr:''))+'</div></details></td></tr>').join(''); }
-async function queueJob(jobId){ await apiPost('queueJobs',{jobIds:[jobId],nodeIds:[nodeid],reason:'device-tab'}); reloadAll(); }
-async function refreshInventory(){ await apiPost('refreshInventory',{nodeid:nodeid}); setTimeout(reloadAll,1500); }
-reloadAll(); setInterval(reloadAll,30000);`;
-
-    return renderShell('Software Orchestrator', 'user', body, script);
+    const safeNodeId = esc(nodeid || '');
+    const body = '<div class="card"><div class="toolbar"><strong>Gerät</strong><span class="muted mono">' + safeNodeId + '</span><button class="alt small" onclick="refreshInventory()">Inventar aktualisieren</button><span id="msg" class="hint"></span></div></div>' +
+      '<div class="split" style="margin-top:16px"><div class="card"><h2>Zugewiesene Jobs</h2><div id="jobs" class="scroll"></div></div><div class="card"><h2>Softwareinventar</h2><div id="inventory" class="scroll"></div></div></div>' +
+      '<div class="card" style="margin-top:16px"><h2>Letzte Runs</h2><div id="runs" class="scroll"></div></div>';
+    const js = `
+const nodeid = __NODEID__; 
+let state = {};
+function escapeHtml(v){ return String(v==null?'':v).replace(/[&<>"']/g,function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]; }); }
+async function refresh(){ state = await apiGet('data', { nodeid: nodeid }); renderJobs(); renderInventory(); renderRuns(); }
+function renderJobs(){ var jobs=(state.jobs||[]).filter(function(j){ return (j.nodeIds||[]).indexOf(nodeid)>=0; }); document.getElementById('jobs').innerHTML = jobs.length ? '<table><thead><tr><th>Job</th><th>Plan</th><th>Aktion</th></tr></thead><tbody>'+jobs.map(function(j){ return '<tr><td>'+escapeHtml(j.name)+'</td><td>'+escapeHtml(fmtSchedule(j.schedule))+'</td><td><button class="small" onclick="queueJob(\''+escapeHtml(j.id)+'\')">Jetzt ausführen</button></td></tr>'; }).join('')+'</tbody></table>' : '<div class="section muted">Keine Jobs zugewiesen.</div>'; }
+function renderInventory(){ var inv=(state.inventory||[])[0]; if(!inv){ document.getElementById('inventory').innerHTML='<div class="section muted">Noch kein Inventar vorhanden.</div>'; return; } var rows=(inv.packages||[]).slice(0,500).map(function(p){ return '<tr><td>'+escapeHtml(p.name||p.DisplayName||'')+'</td><td>'+escapeHtml(p.version||p.DisplayVersion||'')+'</td><td>'+escapeHtml(p.publisher||p.Publisher||'')+'</td></tr>'; }).join(''); document.getElementById('inventory').innerHTML='<div class="section hint">Aktualisiert: '+escapeHtml(inv.updatedAt||'')+'</div><table><thead><tr><th>Name</th><th>Version</th><th>Hersteller</th></tr></thead><tbody>'+rows+'</tbody></table>'; }
+function renderRuns(){ var rows=(state.runs||[]).slice(0,30).map(function(r){ return '<tr><td>'+escapeHtml(r.scriptName||'')+'</td><td><span class="status '+statusClass(r.status)+'">'+escapeHtml(r.status||'')+'</span></td><td>'+escapeHtml(r.updated||r.created||'')+'</td><td><details><summary>Ausgabe</summary><div class="mono">'+escapeHtml((r.stdout||'') + ((r.stderr||'') ? '\nERR:\n' + r.stderr : ''))+'</div></details></td></tr>'; }).join(''); document.getElementById('runs').innerHTML='<table><thead><tr><th>Job</th><th>Status</th><th>Zeit</th><th>Ausgabe</th></tr></thead><tbody>'+rows+'</tbody></table>'; }
+async function queueJob(id){ var r = await apiPost('queueJobs', { jobIds:[id], nodeIds:[nodeid], reason:'device-tab' }); document.getElementById('msg').textContent = r.ok ? 'Zur Warteschlange hinzugefügt' : ('Fehler: ' + (r.error||'')); refresh(); }
+async function refreshInventory(){ var r = await apiPost('refreshInventory', { nodeid: nodeid }); document.getElementById('msg').textContent = r.ok ? 'Inventar angefordert' : ('Fehler: ' + (r.error||'')); setTimeout(refresh, 1500); }
+refresh(); setInterval(refresh, 30000);
+`;
+    return shellHtml('Software Orchestrator', 'user', body, js.replace('__NODEID__', JSON.stringify(nodeid || '')));
   }
 
   obj.onDeviceRefreshEnd = function () {
     pluginHandler.registerPluginTab({ tabTitle: 'Software Orchestrator', tabId: 'pluginSworch' });
     var nodeId = '';
     try { if (typeof currentNode !== 'undefined' && currentNode) nodeId = currentNode._id || ''; } catch (e) { }
-    QA('pluginSworch', '<iframe id="pluginIframeSworch" style="width:100%;height:820px;overflow:auto;border:0;background:#14181e" scrolling="yes" frameBorder="0" src="/pluginadmin.ashx?pin=sworch&user=1&nodeid=' + encodeURIComponent(nodeId) + '"></iframe>');
+    QA('pluginSworch', '<iframe id="pluginIframeSworch" style="width:100%;height:760px;overflow:auto;border:0;background:#121519" scrolling="yes" frameBorder="0" src="/pluginadmin.ashx?pin=sworch&user=1&nodeid=' + encodeURIComponent(nodeId) + '"></iframe>');
   };
 
   obj.server_startup = function () {
-    clearInterval(obj.intervalTimer);
-    obj.intervalTimer = setInterval(processQueue, Number(obj.db.data.settings.queuePollSeconds || 30) * 1000);
-    setTimeout(processQueue, 1500);
+    clearInterval(obj.timer);
+    obj.timer = setInterval(processQueue, Number(obj.db.data.settings.queuePollSeconds || 30) * 1000);
   };
 
   obj.handleAdminReq = async function (req, res, user) {
@@ -430,62 +428,64 @@ reloadAll(); setInterval(reloadAll,30000);`;
         if (api === 'saveJob') {
           if (!isAdmin) return res.sendStatus(401);
           const body = await parseBody(req);
-          const id = body.id || obj.db.id('job');
-          const existing = body.id ? obj.db.get('jobs', body.id) : null;
-          const schedule = body.schedule || { mode: 'manual' };
-          const nextRunAt = computeNextRun(schedule, new Date());
-          const job = {
-            id,
-            name: body.name || 'Neuer Job',
-            description: body.description || '',
-            scriptType: body.scriptType || 'powershell',
-            scriptBody: body.scriptBody || '',
-            parameters: body.parameters || existing?.parameters || {},
-            schedule: { ...schedule, nextRunAt },
-            maxAttempts: Number(body.maxAttempts || existing?.maxAttempts || obj.db.data.settings.maxAttempts || 3),
-            enabled: body.enabled !== false,
-            expiresAt: body.expiresAt || existing?.expiresAt || null,
-            createdAt: existing?.createdAt || nowIso(),
-            updatedAt: nowIso()
-          };
+          let job = null;
+          if (body.id) job = obj.db.get('jobs', body.id);
+          if (job) {
+            job.name = body.name || job.name || 'Job';
+            job.folder = body.folder || '';
+            job.description = body.description || '';
+            job.scriptType = body.scriptType || 'powershell';
+            job.scriptBody = body.scriptBody || '';
+            job.schedule = body.schedule || { mode: 'manual' };
+            job.updatedAt = nowIso();
+          } else {
+            job = {
+              id: obj.db.id('job'),
+              name: body.name || 'Job',
+              folder: body.folder || '',
+              description: body.description || '',
+              scriptType: body.scriptType || 'powershell',
+              scriptBody: body.scriptBody || '',
+              parameters: body.parameters || {},
+              schedule: body.schedule || { mode: 'manual' },
+              maxAttempts: Number(body.maxAttempts || obj.db.data.settings.maxAttempts || 3),
+              enabled: true,
+              expiresAt: body.expiresAt || null,
+              createdAt: nowIso(),
+              updatedAt: nowIso()
+            };
+          }
+          const sched = job.schedule || { mode: 'manual' };
+          if (sched.mode !== 'manual' && sched.mode !== 'onConnect') sched.nextRunAt = computeNextRun(sched, new Date());
           obj.db.upsert('jobs', job.id, job);
           replaceAssignments(job.id, body.targetNodeIds || []);
-          if (body.enqueueNow) uniq(body.targetNodeIds || []).forEach(nodeid => enqueueRun(job, nodeid, 'manual'));
-          return sendJson(res, { ok: true, job }, 201);
+          return sendJson(res, { ok: true, job: obj.db.get('jobs', job.id) }, 200);
         }
         if (api === 'deleteJob') {
           if (!isAdmin) return res.sendStatus(401);
           const body = await parseBody(req);
-          const id = body.id;
-          if (!id) return sendJson(res, { ok: false, error: 'id fehlt' }, 400);
-          obj.db.remove('jobs', id);
-          for (const entry of obj.db.list('assignments').filter(x => x.jobId === id)) obj.db.remove('assignments', entry.id);
+          if (!body.id) return sendJson(res, { ok: false, error: 'Missing job id' }, 400);
+          obj.db.remove('jobs', body.id);
+          obj.db.list('assignments').filter(function (a) { return a.jobId === body.id; }).forEach(function (a) { obj.db.remove('assignments', a.id); });
           return sendJson(res, { ok: true });
         }
         if (api === 'queueJobs') {
-          if (!user) return res.sendStatus(401);
           const body = await parseBody(req);
           const jobIds = uniq(body.jobIds || []);
           const nodeIds = uniq(body.nodeIds || []);
-          const runs = [];
-          for (const jobId of jobIds) {
-            const job = obj.db.get('jobs', jobId);
-            if (!job) continue;
-            const targets = nodeIds.length ? nodeIds : obj.db.list('assignments').filter(a => a.jobId === jobId && a.active !== false).map(a => a.nodeid);
-            uniq(targets).forEach(nodeid => runs.push(enqueueRun(job, nodeid, body.reason || 'manual')));
-          }
-          return sendJson(res, { ok: true, runs });
+          let runs = [];
+          jobIds.forEach(function (jobId) { runs = runs.concat(queueJob(jobId, nodeIds, body.reason || 'manual')); });
+          return sendJson(res, { ok: true, runs: runs });
         }
         if (api === 'refreshInventory') {
           const body = await parseBody(req);
-          const nodeid = body.nodeid || req.query.nodeid;
-          return sendJson(res, { ok: requestInventory(nodeid) });
+          return sendJson(res, { ok: requestInventory(body.nodeid || req.query.nodeid) });
         }
         if (api === 'refreshInventoryAll') {
           if (!isAdmin) return res.sendStatus(401);
           let sent = 0;
-          for (const d of getDevices().filter(x => x.online)) if (requestInventory(d.nodeid)) sent++;
-          return sendJson(res, { ok: true, sent });
+          getDevices().filter(function (d) { return d.online; }).forEach(function (d) { if (requestInventory(d.nodeid)) sent++; });
+          return sendJson(res, { ok: true, sent: sent });
         }
         return sendJson(res, { ok: false, error: 'Unknown api' }, 404);
       } catch (err) {
@@ -507,31 +507,33 @@ reloadAll(); setInterval(reloadAll,30000);`;
   };
 
   obj.hook_agentCoreIsStable = function () {
-    const args = Array.from(arguments);
-    for (const arg of args) {
-      if (typeof arg === 'string' && arg.startsWith('node/')) { onAgentOnline(arg); return; }
+    const args = Array.prototype.slice.call(arguments);
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      if (typeof arg === 'string' && arg.indexOf('node/') === 0) { onAgentOnline(arg); return; }
       if (arg && typeof arg === 'object') {
         if (typeof arg.dbNodeKey === 'string') { onAgentOnline(arg.dbNodeKey); return; }
         if (typeof arg.nodeid === 'string') { onAgentOnline(arg.nodeid); return; }
         if (arg.dbNode && typeof arg.dbNode._id === 'string') { onAgentOnline(arg.dbNode._id); return; }
-        if (typeof arg._id === 'string' && arg._id.startsWith('node/')) { onAgentOnline(arg._id); return; }
+        if (typeof arg._id === 'string' && arg._id.indexOf('node/') === 0) { onAgentOnline(arg._id); return; }
       }
     }
   };
 
   obj.hook_processAgentData = function () {
-    const args = Array.from(arguments);
+    const args = Array.prototype.slice.call(arguments);
     let msg = null;
     let nodeid = null;
-    for (const arg of args) {
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
       if (!msg && arg && typeof arg === 'object' && arg.action === 'plugin' && arg.plugin === 'sworch') msg = arg;
       if (!nodeid) {
-        if (typeof arg === 'string' && arg.startsWith('node/')) nodeid = arg;
+        if (typeof arg === 'string' && arg.indexOf('node/') === 0) nodeid = arg;
         else if (arg && typeof arg === 'object') {
           if (typeof arg.nodeid === 'string') nodeid = arg.nodeid;
           else if (typeof arg.dbNodeKey === 'string') nodeid = arg.dbNodeKey;
           else if (arg.dbNode && typeof arg.dbNode._id === 'string') nodeid = arg.dbNode._id;
-          else if (typeof arg._id === 'string' && arg._id.startsWith('node/')) nodeid = arg._id;
+          else if (typeof arg._id === 'string' && arg._id.indexOf('node/') === 0) nodeid = arg._id;
         }
       }
     }
@@ -553,15 +555,15 @@ reloadAll(); setInterval(reloadAll,30000);`;
         status: msg.response.status || 'failed',
         stdout: msg.response.stdout || '',
         stderr: msg.response.stderr || '',
-        exitCode: msg.response.exitCode == null ? null : msg.response.exitCode,
+        exitCode: (msg.response.exitCode == null) ? null : msg.response.exitCode,
         lastError: msg.response.lastError || null,
         updated: nowIso(),
         finishedAt: nowIso()
       });
-      obj.activeDispatches.delete(msg.response.runId);
+      delete obj.activeDispatches[msg.response.runId];
     }
   };
 
-  obj.shutdown = function () { clearInterval(obj.intervalTimer); };
+  obj.shutdown = function () { clearInterval(obj.timer); };
   return obj;
 };

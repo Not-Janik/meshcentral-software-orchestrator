@@ -1,22 +1,31 @@
-function createScriptTaskAdapter(parent, logger = console) {
+function createScriptTaskAdapter(parent, logger) {
+  logger = logger || console;
+
+  function roots() {
+    return [parent, parent && parent.parent, parent && parent.parent && parent.parent.pluginHandler, parent && parent.pluginHandler].filter(Boolean);
+  }
+
   function findScriptTaskHost() {
-    const roots = [parent, parent && parent.parent, parent && parent.parent && parent.parent.pluginHandler, parent && parent.pluginHandler]
-      .filter(Boolean);
-    for (const root of roots) {
+    for (const root of roots()) {
       for (const [key, value] of Object.entries(root)) {
         if (!value || typeof value !== 'object') continue;
         const id = String(value.shortName || value.name || key).toLowerCase();
-        if (id.includes('scripttask')) return value;
+        if (id.indexOf('scripttask') >= 0) return value;
       }
     }
     return null;
   }
 
+  function wsagents() {
+    return (parent && parent.parent && parent.parent.webserver && parent.parent.webserver.wsagents) ||
+           (parent && parent.webserver && parent.webserver.wsagents) ||
+           parent.wsagents || {};
+  }
+
   function fallbackSend(nodeid, payload) {
-    const wsagents = parent?.parent?.webserver?.wsagents || parent?.webserver?.wsagents || parent?.wsagents || {};
-    const agent = wsagents[nodeid];
+    const agent = wsagents()[nodeid];
     if (!agent || typeof agent.send !== 'function') {
-      return { ok: false, mode: 'fallback', error: 'Agent offline oder send() nicht vorhanden.' };
+      return { ok: false, mode: 'fallback', error: 'Agent offline oder send() fehlt.' };
     }
     agent.send(JSON.stringify(payload));
     return { ok: true, mode: 'fallback' };
@@ -31,27 +40,26 @@ function createScriptTaskAdapter(parent, logger = console) {
       scriptBody: run.scriptBody,
       parameters: run.parameters || {}
     };
-
     const host = findScriptTaskHost();
     if (host) {
-      for (const method of ['queueTask', 'createTask', 'dispatchScript', 'runTask']) {
+      const methods = ['queueTask', 'createTask', 'dispatchScript', 'runTask'];
+      for (const method of methods) {
         if (typeof host[method] === 'function') {
           try {
             const result = host[method](payload);
-            if (result !== false && result != null) return { ok: true, mode: 'scripttask', result };
+            if (result !== false && result != null) return { ok: true, mode: 'scripttask', result: result };
           } catch (err) {
-            logger.warn?.('[sworch] ScriptTask adapter failed on', method, err.message);
+            logger.warn && logger.warn('[sworch] ScriptTask adapter failed on ' + method + ': ' + err.message);
           }
         }
       }
     }
-
-    return fallbackSend(run.nodeid, { action: 'plugin', plugin: 'sworch', subaction: 'run-script', ...payload });
+    return fallbackSend(run.nodeid, { action: 'plugin', plugin: 'sworch', subaction: 'run-script', runId: run.id, jobId: run.jobId, nodeid: run.nodeid, scriptType: run.scriptType, scriptBody: run.scriptBody, parameters: run.parameters || {} });
   }
 
   return {
     dispatchRun,
-    describe() { return { scriptTaskDetected: !!findScriptTaskHost() }; }
+    describe: function () { return { scriptTaskDetected: !!findScriptTaskHost() }; }
   };
 }
 
