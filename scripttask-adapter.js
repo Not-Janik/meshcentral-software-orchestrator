@@ -54,7 +54,7 @@ function createScriptTaskAdapter(parent, logger) {
         }
       }
     }
-    return fallbackSend(run.nodeid, { action: 'plugin', plugin: 'sworch', subaction: 'run-script', runId: run.id, jobId: run.jobId, nodeid: run.nodeid, scriptType: run.scriptType, scriptBody: run.scriptBody, parameters: run.parameters || {} });
+    return fallbackSend(run.nodeid, { action: 'plugin', plugin: 'sworch', pluginaction: 'run-script', runId: run.id, jobId: run.jobId, nodeid: run.nodeid, scriptType: run.scriptType, scriptBody: run.scriptBody, parameters: run.parameters || {} });
   }
 
   return {

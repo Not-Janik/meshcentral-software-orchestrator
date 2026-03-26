@@ -179,7 +179,7 @@ module.exports.sworch = function (parent) {
   function requestInventory(nodeid) {
     const agent = getWsAgents()[nodeid];
     if (!agent || typeof agent.send !== 'function') return false;
-    agent.send(JSON.stringify({ action: 'plugin', plugin: 'sworch', subaction: 'collect-inventory', nodeid: nodeid }));
+    agent.send(JSON.stringify({ action: 'plugin', plugin: 'sworch', pluginaction: 'collect-inventory', nodeid: nodeid }));
     return true;
   }
 
@@ -538,7 +538,8 @@ refresh(); setInterval(refresh, 30000);
       }
     }
     if (!msg) return;
-    if (msg.subaction === 'inventory-result' && msg.response) {
+    const msgAction = msg.subaction || msg.pluginaction;
+    if (msgAction === 'inventory-result' && msg.response) {
       const rec = {
         id: msg.response.nodeid || nodeid,
         nodeid: msg.response.nodeid || nodeid,
@@ -550,7 +551,7 @@ refresh(); setInterval(refresh, 30000);
       obj.db.upsert('inventory', rec.id, rec);
       return;
     }
-    if (msg.subaction === 'run-result' && msg.response && msg.response.runId) {
+    if (msgAction === 'run-result' && msg.response && msg.response.runId) {
       obj.db.patch('runs', msg.response.runId, {
         status: msg.response.status || 'failed',
         stdout: msg.response.stdout || '',

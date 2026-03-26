@@ -1,7 +1,7 @@
 {
   "name": "Software Orchestrator",
   "shortName": "sworch",
-  "version": "0.4.0",
+  "version": "1.0.1",
   "author": "OpenAI",
   "description": "ScriptTask-style software orchestration plugin with offline queue and software inventory.",
   "hasAdminPanel": false,
