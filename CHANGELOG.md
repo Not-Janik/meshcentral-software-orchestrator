@@ -1,22 +1,8 @@
 # Changelog
 
-## 0.2.2
-- Admin- und API-Routen auf authentifizierte MeshCentral-Session umgestellt
-- Admin-Seite und Device-Tab robuster registriert
-- Device-Tab liest Inventar gezielt fuer das geoeffnete Geraet
-
-# Changelog
-
-## 0.2.1
-- Korrigierte MeshCentral-Plugin-Metadaten fuer GitHub-Import.
-- Echte URLs fuer Homepage, Config, Download und Versionshistorie eingetragen.
-- CHANGELOG.md fuer den Plugin-Importer hinzugefuegt.
-- Paket fuer Ablage direkt im Repository-Root vorbereitet.
-
-## 0.2.0
-- Modernisierte Admin-Oberflaeche.
-- Persistente Offline-Queue.
-- onConnect-Ausfuehrung.
-- Zeitplanung fuer Jobs.
-- Basis fuer Softwareinventar.
-- Bulk-Zuweisungen fuer Jobs und Geraete.
+## 0.3.0
+- Plugin-Integration auf MeshCentral-Hook-Basis neu aufgebaut
+- Admin-Seite jetzt ueber `handleAdminReq` statt eigener Express-Route
+- Device-Tab jetzt im ScriptTask-Stil ueber `/pluginadmin.ashx?pin=sworch&user=1`
+- Persistente Queue, Bulk-Zuweisung, einfache Zeitplaene und Inventaransicht integriert
+- Fallback auf direkten Agent-Dispatch, wenn kein ScriptTask-Host gefunden wird

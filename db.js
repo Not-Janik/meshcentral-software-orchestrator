@@ -27,7 +27,7 @@ class JsonStore {
       const parsed = JSON.parse(fs.readFileSync(this.file, 'utf8'));
       this.data = mergeDeep(this.data, parsed || {});
     } catch (err) {
-      console.error('[sworch] DB konnte nicht geladen werden:', err.message);
+      console.error('[sworch] DB load failed:', err.message);
     }
   }
 
@@ -39,27 +39,19 @@ class JsonStore {
     return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
-  list(collection) {
-    return Object.values(this.data[collection] || {});
-  }
-
-  get(collection, id) {
-    return (this.data[collection] || {})[id] || null;
-  }
-
+  list(collection) { return Object.values(this.data[collection] || {}); }
+  get(collection, id) { return (this.data[collection] || {})[id] || null; }
   upsert(collection, id, value) {
     if (!this.data[collection]) this.data[collection] = {};
     this.data[collection][id] = value;
     this.save();
     return value;
   }
-
   patch(collection, id, partial) {
-    const current = this.get(collection, id);
-    if (!current) return null;
-    return this.upsert(collection, id, { ...current, ...partial });
+    const cur = this.get(collection, id);
+    if (!cur) return null;
+    return this.upsert(collection, id, { ...cur, ...partial });
   }
-
   remove(collection, id) {
     if (!this.data[collection] || !this.data[collection][id]) return false;
     delete this.data[collection][id];
