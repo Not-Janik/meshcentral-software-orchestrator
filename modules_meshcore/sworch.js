@@ -7,6 +7,10 @@
     } catch (e) { }
   }
 
+  function safeJsonParse(txt) {
+    try { return JSON.parse(txt); } catch (e) { return null; }
+  }
+
   function collectInventory() {
     var out = [];
     try {
@@ -14,13 +18,14 @@
       if (process.platform === 'win32') {
         var cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-ItemProperty HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*,HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\* | Where-Object {$_.DisplayName} | Select-Object DisplayName,DisplayVersion,Publisher | ConvertTo-Json -Compress"';
         var res = cp.execSync(cmd).toString();
-        out = JSON.parse(res);
-        if (!Array.isArray(out)) out = [out];
+        out = safeJsonParse(res) || [];
+        if (!Array.isArray(out)) { out = [out]; }
         out = out.map(function (x) {
           return { name: x.DisplayName || '', version: x.DisplayVersion || '', publisher: x.Publisher || '' };
         });
       } else {
-        var txt = cp.execSync(`sh -lc "command -v dpkg-query >/dev/null 2>&1 && dpkg-query -W -f='${Package}\t${Version}\n' || (command -v rpm >/dev/null 2>&1 && rpm -qa) || true"`).toString();
+        var linuxCmd = "sh -lc \"if command -v dpkg-query >/dev/null 2>&1; then dpkg-query -W -f='\\${Package}\\t\\${Version}\\n'; elif command -v rpm >/dev/null 2>&1; then rpm -qa; fi\"";
+        var txt = cp.execSync(linuxCmd).toString();
         out = txt.split(/\r?\n/).filter(Boolean).map(function (line) {
           var p = line.split(/\t/, 2);
           return { name: p[0] || line, version: p[1] || '', publisher: '' };
@@ -44,12 +49,12 @@
       } else {
         proc = cp.spawnSync('/bin/sh', ['-lc', body], { encoding: 'utf8' });
       }
-      result.stdout = proc.stdout || '';
-      result.stderr = proc.stderr || '';
-      result.exitCode = Number(proc.status || 0);
+      result.stdout = proc && proc.stdout ? proc.stdout : '';
+      result.stderr = proc && proc.stderr ? proc.stderr : '';
+      result.exitCode = (proc && typeof proc.status === 'number') ? proc.status : 0;
       result.status = result.exitCode === 0 ? 'success' : 'failed';
     } catch (e) {
-      result.stderr = String(e && e.message || e);
+      result.stderr = String((e && e.message) || e);
     }
     send({ action: 'plugin', plugin: 'sworch', subaction: 'run-result', response: result });
   }

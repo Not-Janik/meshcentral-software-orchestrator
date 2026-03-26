@@ -1,8 +1,9 @@
 # Changelog
 
 ## 0.3.0
-- Plugin-Integration auf MeshCentral-Hook-Basis neu aufgebaut
-- Admin-Seite jetzt ueber `handleAdminReq` statt eigener Express-Route
-- Device-Tab jetzt im ScriptTask-Stil ueber `/pluginadmin.ashx?pin=sworch&user=1`
-- Persistente Queue, Bulk-Zuweisung, einfache Zeitplaene und Inventaransicht integriert
-- Fallback auf direkten Agent-Dispatch, wenn kein ScriptTask-Host gefunden wird
+- UI grundlegend ueberarbeitet und dunkles Dashboard im Stil einer Job-Konsole eingefuehrt.
+- Job-Editor mit kontextsensitiven Plan-Feldern gebaut.
+- Speichern/Aktualisieren/Loeschen von Jobs implementiert.
+- Geraeteauswahl mit Filter und Checkboxen verbessert.
+- Queue, Ausfuehrungslog und Inventaransicht stabilisiert.
+- MeshAgent-Modul auf ES5-kompatiblen Stil umgestellt und Syntaxfehler fuer Linux-Inventarisierung behoben.

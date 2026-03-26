@@ -1,9 +1,9 @@
 'use strict';
 
-const { JsonStore } = require('./db');
-const { createScriptTaskAdapter } = require('./scripttask-adapter');
 const path = require('path');
 const crypto = require('crypto');
+const { JsonStore } = require('./db');
+const { createScriptTaskAdapter } = require('./scripttask-adapter');
 
 function nowIso() { return new Date().toISOString(); }
 function uniq(values) { return [...new Set((Array.isArray(values) ? values : [values]).filter(Boolean))]; }
@@ -26,13 +26,11 @@ function computeNextRun(schedule, ref) {
   }
   if (schedule.mode === 'weekly') {
     const weekdays = uniq(schedule.weekdays || []).map(Number).filter(x => x >= 0 && x <= 6);
-    const probe = new Date(base);
     for (let i = 0; i < 14; i++) {
-      const x = new Date(base);
-      x.setDate(base.getDate() + i);
-      x.setHours(Number(schedule.hour || 0), Number(schedule.minute || 0), 0, 0);
-      if (x > base && weekdays.includes(x.getDay())) return x.toISOString();
-      probe.setTime(x.getTime());
+      const d = new Date(base);
+      d.setDate(base.getDate() + i);
+      d.setHours(Number(schedule.hour || 0), Number(schedule.minute || 0), 0, 0);
+      if (d > base && weekdays.includes(d.getDay())) return d.toISOString();
     }
   }
   return null;
@@ -56,10 +54,12 @@ module.exports.sworch = function (parent) {
 
   function getDevices() {
     const devices = [];
+    const seen = new Set();
     const wsagents = getWsAgents();
     const webDevices = obj.meshServer?.webserver?.devices || {};
 
     for (const [nodeid, device] of Object.entries(webDevices)) {
+      seen.add(nodeid);
       devices.push({
         nodeid,
         name: device.name || device.rname || nodeid,
@@ -70,7 +70,7 @@ module.exports.sworch = function (parent) {
     }
 
     for (const [nodeid, agent] of Object.entries(wsagents)) {
-      if (devices.find(d => d.nodeid === nodeid)) continue;
+      if (seen.has(nodeid)) continue;
       devices.push({
         nodeid,
         name: agent.dbNode?.name || agent.name || nodeid,
@@ -84,8 +84,8 @@ module.exports.sworch = function (parent) {
   }
 
   function getNodeName(nodeid) {
-    const x = getDevices().find(d => d.nodeid === nodeid);
-    return x ? x.name : nodeid;
+    const device = getDevices().find(d => d.nodeid === nodeid);
+    return device ? device.name : nodeid;
   }
 
   function isOnline(nodeid) { return !!getWsAgents()[nodeid]; }
@@ -104,7 +104,8 @@ module.exports.sworch = function (parent) {
         queued: r.filter(x => x.status === 'queued').length,
         running: r.filter(x => x.status === 'running').length,
         failed: r.filter(x => x.status === 'failed').length,
-        success: r.filter(x => x.status === 'success').length
+        success: r.filter(x => x.status === 'success').length,
+        lastRunAt: r.map(x => x.updated || x.created || '').sort().slice(-1)[0] || null
       };
     }).sort((a, b) => String(a.name).localeCompare(String(b.name), 'de'));
   }
@@ -115,6 +116,19 @@ module.exports.sworch = function (parent) {
     const rec = { id: obj.db.id('asg'), jobId, nodeid, active: true, createdAt: nowIso() };
     obj.db.upsert('assignments', rec.id, rec);
     return rec;
+  }
+
+  function replaceAssignments(jobId, nodeIds) {
+    const keep = new Set(uniq(nodeIds));
+    for (const entry of obj.db.list('assignments').filter(x => x.jobId === jobId)) {
+      if (keep.has(entry.nodeid)) {
+        if (entry.active === false) obj.db.patch('assignments', entry.id, { active: true });
+        keep.delete(entry.nodeid);
+      } else if (entry.active !== false) {
+        obj.db.patch('assignments', entry.id, { active: false });
+      }
+    }
+    for (const nodeid of keep) ensureAssignment(jobId, nodeid);
   }
 
   function createRun(job, nodeid, reason) {
@@ -281,98 +295,112 @@ module.exports.sworch = function (parent) {
     return `<!doctype html>
 <html><head><meta charset="utf-8"><title>${escHtml(title)}</title>
 <style>
-body{font-family:Arial,Helvetica,sans-serif;margin:0;padding:16px;background:#f3f6fb;color:#10233a}
-.grid{display:grid;gap:16px}.stats{grid-template-columns:repeat(auto-fit,minmax(160px,1fr))}.cols{grid-template-columns:1.2fr .8fr}.card{background:#fff;border-radius:16px;padding:16px;box-shadow:0 8px 24px rgba(15,45,91,.08)}
-h1,h2,h3{margin:0 0 12px}small, .muted{color:#5d7186}.badge{display:inline-block;padding:4px 10px;border-radius:999px;background:#e9f1ff;color:#174a99;font-size:12px;font-weight:700}
-label{display:block;font-size:12px;margin:10px 0 4px;color:#46586b}input,select,textarea,button{font:inherit}input,select,textarea{width:100%;box-sizing:border-box;border:1px solid #d4dbe5;border-radius:10px;padding:10px;background:#fff}
-textarea{min-height:140px;resize:vertical}button{border:0;border-radius:10px;padding:10px 14px;background:#1f63ff;color:#fff;font-weight:700;cursor:pointer}button.secondary{background:#eef3fb;color:#18324d}button.warn{background:#d94141}button:disabled{opacity:.6;cursor:not-allowed}
-table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px;border-bottom:1px solid #edf1f7;font-size:13px;vertical-align:top}th{color:#4d6176;font-size:12px;text-transform:uppercase}
-.flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.listbox{height:220px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap}
-.pill{display:inline-block;background:#eef3fb;border-radius:999px;padding:3px 8px;font-size:12px;margin:2px 4px 2px 0}.ok{color:#0f7b36}.bad{color:#b42318}.warntext{color:#b26b00}
-</style></head><body data-mode="${escHtml(mode)}">${body}<script>
+:root{--bg:#14181e;--bg2:#1c222b;--panel:#1b2129;--panel2:#10151b;--line:#323a45;--text:#f0f3f7;--muted:#9aa6b2;--blue:#1a8cff;--green:#4caf50;--red:#d9534f;--amber:#ffb23f}
+*{box-sizing:border-box}body{font-family:Segoe UI,Arial,Helvetica,sans-serif;margin:0;background:var(--bg);color:var(--text)}
+.page{padding:18px}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,.18)}
+header.card{padding:16px 18px;margin-bottom:16px}.title{font-size:34px;color:#6dc2ff;font-weight:300}.subtitle{margin-top:6px;color:var(--muted)}
+.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.grid{display:grid;gap:16px}.two{grid-template-columns:1.2fr .8fr}.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.section{padding:16px}.section h2,.section h3{margin:0 0 14px}.label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}.input,.select,.textarea{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:10px}
+.textarea{min-height:170px;resize:vertical}.row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.row4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.hidden{display:none !important}
+.btn{background:var(--blue);color:#fff;border:0;border-radius:6px;padding:10px 14px;font-weight:600;cursor:pointer}.btn.secondary{background:#2a3340}.btn.warn{background:var(--red)}.btn.good{background:var(--green)}.btn:disabled{opacity:.55;cursor:not-allowed}
+.status-pill{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:700}.st-queued{background:#594414;color:#ffde8a}.st-running{background:#11405b;color:#8cd4ff}.st-success{background:#1e5125;color:#aff0b3}.st-failed,.st-expired{background:#5b1a1a;color:#ffadad}
+.stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}.stat{padding:14px}.stat .k{font-size:12px;color:var(--muted);text-transform:uppercase}.stat .v{font-size:28px;font-weight:700;margin-top:6px}
+.list{width:100%;border-collapse:collapse}.list th,.list td{border-bottom:1px solid var(--line);padding:10px 8px;text-align:left;font-size:13px;vertical-align:top}.list th{font-size:12px;text-transform:uppercase;color:var(--muted)}
+.list tr.active{background:#0e314e}.jobs tbody tr{cursor:pointer}.mono{font-family:Consolas,monospace;white-space:pre-wrap}.muted{color:var(--muted)}.ok{color:#9de0a0}.bad{color:#ff9e9e}
+.flex{display:flex;gap:10px;align-items:center}.space{justify-content:space-between}.search{min-width:220px}.scroll{max-height:420px;overflow:auto}.chkcell{width:34px}.small{font-size:12px}
+.schedule-box{padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel2)}
+#log{max-height:280px;overflow:auto;background:var(--panel2);border:1px solid var(--line);padding:10px;border-radius:6px}
+</style></head><body data-mode="${escHtml(mode)}"><div class="page">${body}</div><script>
 const apiBase = '/pluginadmin.ashx?pin=sworch&${mode}=1';
-async function apiGet(q){ const r = await fetch(apiBase + '&api=' + encodeURIComponent(q), { credentials:'same-origin' }); return r.json(); }
-async function apiPost(q, body){ const r = await fetch(apiBase + '&api=' + encodeURIComponent(q), { method:'POST', headers:{'Content-Type':'application/json'}, credentials:'same-origin', body: JSON.stringify(body||{}) }); return r.json(); }
-function fmtSchedule(s){ if(!s||!s.mode) return 'manuell'; if(s.mode==='interval') return 'alle '+(s.intervalMinutes||60)+' Min'; if(s.mode==='daily') return 'taeglich '+String(s.hour||0).padStart(2,'0')+':'+String(s.minute||0).padStart(2,'0'); if(s.mode==='weekly') return 'woechentlich '+(s.weekdays||[]).join(',')+' '+String(s.hour||0).padStart(2,'0')+':'+String(s.minute||0).padStart(2,'0'); if(s.mode==='once') return s.runAt||'einmalig'; if(s.mode==='onConnect') return 'bei Online'; return s.mode; }
+async function apiGet(q){ const r=await fetch(apiBase+'&api='+q,{credentials:'same-origin'}); return r.json(); }
+async function apiPost(q,body){ const r=await fetch(apiBase+'&api='+q,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(body||{})}); return r.json(); }
+function esc(v){ return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function statusClass(s){ return 'st-'+String(s||'').toLowerCase(); }
+function fmtSchedule(s){ if(!s||!s.mode||s.mode==='manual') return 'Manuell'; if(s.mode==='onConnect') return 'Beim Onlinegehen'; if(s.mode==='interval') return 'Alle '+(s.intervalMinutes||60)+' Minuten'; if(s.mode==='daily') return 'Taeglich '+String(s.hour||0).padStart(2,'0')+':'+String(s.minute||0).padStart(2,'0'); if(s.mode==='weekly') return 'Woechentlich ('+(s.weekdays||[]).join(', ')+') '+String(s.hour||0).padStart(2,'0')+':'+String(s.minute||0).padStart(2,'0'); if(s.mode==='once') return s.runAt||'Einmalig'; return s.mode; }
 ${extraScript || ''}
 </script></body></html>`;
   }
 
   function renderAdminPage() {
     const body = `
-<div class="grid stats" id="stats"></div>
-<div class="grid cols">
-  <div class="card">
-    <h2>Job anlegen</h2>
-    <div class="grid" style="grid-template-columns:1fr 1fr">
-      <div><label>Name</label><input id="jobName"></div>
-      <div><label>Skripttyp</label><select id="jobType"><option value="powershell">PowerShell</option><option value="shell">Shell/BAT</option></select></div>
-    </div>
-    <label>Beschreibung</label><input id="jobDescription">
-    <label>Skript</label><textarea id="jobScript"></textarea>
-    <div class="grid" style="grid-template-columns:1fr 1fr 1fr 1fr">
-      <div><label>Plan</label><select id="scheduleMode"><option value="manual">Manuell</option><option value="onConnect">Bei Online</option><option value="interval">Intervall</option><option value="daily">Taeglich</option><option value="weekly">Woechentlich</option><option value="once">Einmalig</option></select></div>
-      <div><label>Intervall Minuten</label><input id="intervalMinutes" type="number" value="60"></div>
-      <div><label>Stunde</label><input id="scheduleHour" type="number" value="18"></div>
-      <div><label>Minute</label><input id="scheduleMinute" type="number" value="0"></div>
-    </div>
-    <div class="grid" style="grid-template-columns:1fr 1fr">
-      <div><label>Wochentage (0-6, Komma)</label><input id="scheduleWeekdays" value="1,2,3,4,5"></div>
-      <div><label>Einmalig UTC/ISO</label><input id="scheduleOnce" placeholder="2026-03-30T18:00:00.000Z"></div>
-    </div>
-    <label>Zielgeraete</label><select id="deviceSelect" class="listbox" multiple></select>
-    <div class="flex" style="margin-top:12px"><button onclick="saveJob(true)">Job speichern und queue'n</button><button class="secondary" onclick="saveJob(false)">Nur speichern</button><span class="muted" id="saveResult"></span></div>
+<header class="card"><div class="title">Jobs</div><div class="subtitle">Zuweisen, planen und in der Warteschlange halten, bis Agents online sind.</div></header>
+<div class="stats" id="stats"></div>
+<div class="grid two" style="margin-top:16px">
+  <div class="card section">
+    <div class="toolbar space"><h2>Job-Uebersicht</h2><div class="toolbar"><input id="jobFilter" class="input search" placeholder="Eintraege filtern"><button class="btn secondary" onclick="newJob()">Neuer Job</button><button class="btn secondary" onclick="reloadAll()">Aktualisieren</button></div></div>
+    <div class="scroll"><table class="list jobs"><thead><tr><th></th><th>Job: Name</th><th>Plan</th><th>Letzte Aktion</th><th>Zustand</th></tr></thead><tbody id="jobsBody"></tbody></table></div>
   </div>
-  <div class="card">
-    <h2>Bulk-Zuweisung</h2>
-    <label>Jobs</label><select id="jobBulk" class="listbox" multiple></select>
-    <label>Geraete</label><select id="deviceBulk" class="listbox" multiple></select>
-    <div class="flex" style="margin-top:12px"><button onclick="bulkAssign(true)">Zuweisen und queue'n</button><button class="secondary" onclick="bulkAssign(false)">Nur zuweisen</button><span class="muted" id="bulkResult"></span></div>
+  <div class="card section">
+    <div class="toolbar space"><h2 id="editorTitle">Job anlegen</h2><div class="toolbar"><button class="btn good" onclick="saveJob()">Speichern</button><button class="btn secondary" onclick="queueEditedJob()">Jetzt queue'n</button><button class="btn warn" onclick="deleteJob()">Loeschen</button></div></div>
+    <div class="row"><div><label class="label">Name</label><input id="jobName" class="input"></div><div><label class="label">Skripttyp</label><select id="jobType" class="select"><option value="powershell">PowerShell</option><option value="shell">Shell / CMD</option></select></div></div>
+    <div style="margin-top:12px"><label class="label">Beschreibung</label><input id="jobDescription" class="input"></div>
+    <div style="margin-top:12px"><label class="label">Skript</label><textarea id="jobScript" class="textarea"></textarea></div>
+    <div style="margin-top:12px"><label class="label">Plan</label><select id="scheduleMode" class="select" onchange="toggleScheduleFields()"><option value="manual">Manuell</option><option value="onConnect">Beim Onlinegehen</option><option value="interval">Intervall</option><option value="daily">Taeglich</option><option value="weekly">Woechentlich</option><option value="once">Einmalig</option></select></div>
+    <div id="scheduleFields" class="schedule-box" style="margin-top:12px">
+      <div class="row4" id="rowInterval"><div><label class="label">Intervall Minuten</label><input id="intervalMinutes" class="input" type="number" min="1" value="60"></div></div>
+      <div class="row" id="rowTime" style="margin-top:10px"><div><label class="label">Stunde</label><input id="scheduleHour" class="input" type="number" min="0" max="23" value="18"></div><div><label class="label">Minute</label><input id="scheduleMinute" class="input" type="number" min="0" max="59" value="0"></div></div>
+      <div id="rowWeekly" style="margin-top:10px"><label class="label">Wochentage</label><div class="toolbar small"><label><input type="checkbox" class="weekday" value="1"> Mo</label><label><input type="checkbox" class="weekday" value="2"> Di</label><label><input type="checkbox" class="weekday" value="3"> Mi</label><label><input type="checkbox" class="weekday" value="4"> Do</label><label><input type="checkbox" class="weekday" value="5"> Fr</label><label><input type="checkbox" class="weekday" value="6"> Sa</label><label><input type="checkbox" class="weekday" value="0"> So</label></div></div>
+      <div id="rowOnce" style="margin-top:10px"><label class="label">Ausfuehren am (ISO/UTC)</label><input id="scheduleOnce" class="input" placeholder="2026-03-30T18:00:00.000Z"></div>
+    </div>
+    <div style="margin-top:16px"><label class="label">Zielgeraete</label><div class="toolbar" style="margin-bottom:8px"><input id="deviceFilter" class="input search" placeholder="Geraete filtern"><button class="btn secondary" onclick="selectVisibleDevices(true)">Alle sichtbaren</button><button class="btn secondary" onclick="selectVisibleDevices(false)">Keine</button></div><div class="scroll"><table class="list"><thead><tr><th class="chkcell"></th><th>Geraet</th><th>Plattform</th><th>Status</th></tr></thead><tbody id="devicesBody"></tbody></table></div></div>
+    <div class="small muted" id="saveResult" style="margin-top:10px"></div>
   </div>
 </div>
-<div class="card" style="margin-top:16px"><h2>Jobs</h2><div id="jobsTable"></div></div>
-<div class="grid cols" style="margin-top:16px">
-  <div class="card"><h2>Queue / Runs</h2><div id="runsTable"></div></div>
-  <div class="card"><h2>Inventar</h2><div class="flex" style="margin-bottom:12px"><button class="secondary" onclick="refreshInventories()">Inventar fuer alle Online-Geraete anfragen</button><span class="muted" id="invResult"></span></div><div id="inventoryTable"></div></div>
+<div class="grid two" style="margin-top:16px">
+  <div class="card section"><div class="toolbar space"><h2>Queue</h2><div class="toolbar"><button class="btn secondary" onclick="refreshQueue()">Aktualisieren</button></div></div><div class="scroll"><table class="list"><thead><tr><th>Geraet</th><th>Job</th><th>Status</th><th>Letzte Aktion</th><th>Ausgabe</th></tr></thead><tbody id="runsBody"></tbody></table></div></div>
+  <div class="card section"><div class="toolbar space"><h2>Softwareinventar</h2><div class="toolbar"><button class="btn secondary" onclick="refreshInventories()">Online-Geraete abfragen</button></div></div><div class="scroll"><table class="list"><thead><tr><th>Geraet</th><th>Plattform</th><th>Pakete</th><th>Aktualisiert</th></tr></thead><tbody id="inventoryBody"></tbody></table></div><div id="log" style="margin-top:12px"></div></div>
 </div>`;
 
     const script = `
 let state = { devices: [], jobs: [], runs: [], inventory: [], stats: {} };
-function selectedValues(id){ return Array.from(document.getElementById(id).selectedOptions).map(o=>o.value); }
-function currentSchedule(){ const mode = document.getElementById('scheduleMode').value; const s={mode}; if(mode==='interval') s.intervalMinutes=Number(document.getElementById('intervalMinutes').value||60); if(mode==='daily'||mode==='weekly'){ s.hour=Number(document.getElementById('scheduleHour').value||0); s.minute=Number(document.getElementById('scheduleMinute').value||0); } if(mode==='weekly') s.weekdays=document.getElementById('scheduleWeekdays').value.split(',').map(x=>Number(x.trim())).filter(x=>!Number.isNaN(x)); if(mode==='once') s.runAt=document.getElementById('scheduleOnce').value||null; return s; }
-function renderStats(){ const s=state.stats||{}; document.getElementById('stats').innerHTML=['Jobs','Geraete','Queued','Running','Fehler'].map((k,i)=>{ const vals=[s.jobs||0,s.devices||0,s.queuedRuns||0,s.runningRuns||0,s.failedRuns||0]; return '<div class="card"><div class="muted">'+k+'</div><div style="font-size:28px;font-weight:700;margin-top:8px">'+vals[i]+'</div></div>'; }).join(''); }
-function renderSelects(){ const devOpt = state.devices.map(d=>'<option value="'+d.nodeid+'">'+d.name+' '+(d.online?'(online)':'(offline)')+'</option>').join(''); document.getElementById('deviceSelect').innerHTML=devOpt; document.getElementById('deviceBulk').innerHTML=devOpt; document.getElementById('jobBulk').innerHTML=state.jobs.map(j=>'<option value="'+j.id+'">'+j.name+'</option>').join(''); }
-function renderJobs(){ document.getElementById('jobsTable').innerHTML='<table><thead><tr><th>Name</th><th>Plan</th><th>Ziele</th><th>Queue</th><th>Aktion</th></tr></thead><tbody>' + state.jobs.map(j=>'<tr><td><strong>'+j.name+'</strong><br><span class="muted">'+(j.description||'')+'</span></td><td>'+fmtSchedule(j.schedule)+'</td><td>'+j.assignedCount+'</td><td><span class="pill">queued '+j.queued+'</span><span class="pill">running '+j.running+'</span><span class="pill">ok '+j.success+'</span><span class="pill">fail '+j.failed+'</span></td><td><button onclick="queueSingle(\''+j.id+'\')">Jetzt queue'n</button></td></tr>').join('') + '</tbody></table>'; }
-function renderRuns(){ const rows = state.runs.slice(0,40).map(r=>'<tr><td>'+r.nodeName+'</td><td>'+r.scriptName+'</td><td>'+r.status+'</td><td>'+(r.updated||r.created||'')+'</td><td><details><summary>Log</summary><div class="mono">'+(r.stdout||'')+(r.stderr?'\nERR:\n'+r.stderr:'')+'</div></details></td></tr>').join(''); document.getElementById('runsTable').innerHTML='<table><thead><tr><th>Geraet</th><th>Job</th><th>Status</th><th>Aktualisiert</th><th>Ausgabe</th></tr></thead><tbody>'+rows+'</tbody></table>'; }
-function renderInventory(){ const rows = state.inventory.slice(0,30).map(i=>'<tr><td>'+i.nodeName+'</td><td>'+i.platform+'</td><td>'+(i.packages?i.packages.length:0)+'</td><td>'+(i.updatedAt||'')+'</td></tr>').join(''); document.getElementById('inventoryTable').innerHTML='<table><thead><tr><th>Geraet</th><th>Plattform</th><th>Pakete</th><th>Aktualisiert</th></tr></thead><tbody>'+rows+'</tbody></table>'; }
-async function refresh(){ state = await apiGet('data'); renderStats(); renderSelects(); renderJobs(); renderRuns(); renderInventory(); }
-async function saveJob(enqueueNow){ const payload={ name:document.getElementById('jobName').value||'Neuer Job', description:document.getElementById('jobDescription').value||'', scriptType:document.getElementById('jobType').value, scriptBody:document.getElementById('jobScript').value||'', schedule:currentSchedule(), targetNodeIds:selectedValues('deviceSelect'), enqueueNow }; const r=await apiPost('saveJob', payload); document.getElementById('saveResult').textContent=r.ok?'Gespeichert':'Fehler: '+(r.error||''); if(r.ok) refresh(); }
-async function bulkAssign(enqueueNow){ const r=await apiPost('bulkAssign', { jobIds:selectedValues('jobBulk'), nodeIds:selectedValues('deviceBulk'), enqueueNow }); document.getElementById('bulkResult').textContent=r.ok?'Erledigt':'Fehler: '+(r.error||''); if(r.ok) refresh(); }
-async function queueSingle(jobId){ await apiPost('queueJobs',{ jobIds:[jobId] }); refresh(); }
-async function refreshInventories(){ const r = await apiPost('refreshInventoryAll',{}); document.getElementById('invResult').textContent=r.ok?'Anfragen gesendet: '+r.sent:'Fehler'; setTimeout(refresh, 1500); }
-refresh(); setInterval(refresh, 30000);`;
+let selectedJobId = null;
+function log(msg){ const el=document.getElementById('log'); const line=document.createElement('div'); line.textContent='['+new Date().toLocaleTimeString()+'] '+msg; el.prepend(line); }
+function selectedDeviceIds(){ return Array.from(document.querySelectorAll('#devicesBody input[type=checkbox]:checked')).map(x=>x.value); }
+function visibleDeviceRows(){ return Array.from(document.querySelectorAll('#devicesBody tr')).filter(tr=>tr.style.display!=='none'); }
+function getSchedule(){ const mode=document.getElementById('scheduleMode').value; const s={mode:mode}; if(mode==='interval'){ s.intervalMinutes=Number(document.getElementById('intervalMinutes').value||60); } if(mode==='daily'||mode==='weekly'){ s.hour=Number(document.getElementById('scheduleHour').value||0); s.minute=Number(document.getElementById('scheduleMinute').value||0); } if(mode==='weekly'){ s.weekdays=Array.from(document.querySelectorAll('.weekday:checked')).map(x=>Number(x.value)); } if(mode==='once'){ s.runAt=document.getElementById('scheduleOnce').value||null; } return s; }
+function toggleScheduleFields(){ const mode=document.getElementById('scheduleMode').value; document.getElementById('rowInterval').classList.toggle('hidden', mode!=='interval'); document.getElementById('rowTime').classList.toggle('hidden', !(mode==='daily'||mode==='weekly')); document.getElementById('rowWeekly').classList.toggle('hidden', mode!=='weekly'); document.getElementById('rowOnce').classList.toggle('hidden', mode!=='once'); document.getElementById('scheduleFields').classList.toggle('hidden', mode==='manual'||mode==='onConnect'); }
+function applyFilters(){ const jf=(document.getElementById('jobFilter').value||'').toLowerCase(); Array.from(document.querySelectorAll('#jobsBody tr')).forEach(tr=>{ tr.style.display=tr.dataset.search.includes(jf)?'':'none'; }); const df=(document.getElementById('deviceFilter').value||'').toLowerCase(); Array.from(document.querySelectorAll('#devicesBody tr')).forEach(tr=>{ tr.style.display=tr.dataset.search.includes(df)?'':'none'; }); }
+function renderStats(){ const s=state.stats||{}; const vals=[['Jobs',s.jobs||0],['Geraete',s.devices||0],['Queued',s.queuedRuns||0],['Running',s.runningRuns||0],['Fehler',s.failedRuns||0]]; document.getElementById('stats').innerHTML=vals.map(v=>'<div class="card stat"><div class="k">'+v[0]+'</div><div class="v">'+v[1]+'</div></div>').join(''); }
+function renderJobs(){ const tbody=document.getElementById('jobsBody'); tbody.innerHTML=state.jobs.map((j,i)=>{ const status=j.failed>0?'Fehler':(j.running>0?'Laufend':(j.queued>0?'Geplant':'OK')); const cls=status==='Fehler'?'st-failed':(status==='Laufend'?'st-running':(status==='Geplant'?'st-queued':'st-success')); return '<tr data-id="'+j.id+'" data-search="'+esc((j.name+' '+(j.description||'')).toLowerCase())+'" class="'+(j.id===selectedJobId?'active':'')+'" onclick="pickJob(\''+j.id+'\')"><td>'+(i+1)+'</td><td><strong>'+esc(j.name)+'</strong><div class="muted small">'+esc(j.description||'')+'</div></td><td>'+esc(fmtSchedule(j.schedule))+'</td><td>'+(j.lastRunAt?esc(j.lastRunAt):'<span class="muted">Noch nie</span>')+'</td><td><span class="status-pill '+cls+'">'+status+'</span></td></tr>'; }).join(''); applyFilters(); }
+function renderDevices(){ const selected=new Set(selectedDeviceIds()); document.getElementById('devicesBody').innerHTML=state.devices.map(d=>'<tr data-search="'+esc((d.name+' '+(d.platform||'')).toLowerCase())+'"><td class="chkcell"><input type="checkbox" value="'+d.nodeid+'" '+(selected.has(d.nodeid)?'checked':'')+'></td><td>'+esc(d.name)+'</td><td>'+esc(d.platform||'')+'</td><td>'+(d.online?'<span class="status-pill st-success">Online</span>':'<span class="status-pill st-failed">Offline</span>')+'</td></tr>').join(''); applyFilters(); }
+function renderRuns(){ document.getElementById('runsBody').innerHTML=state.runs.slice(0,80).map(r=>'<tr><td>'+esc(r.nodeName||r.nodeid)+'</td><td>'+esc(r.scriptName||'')+'</td><td><span class="status-pill '+statusClass(r.status)+'">'+esc(r.status||'')+'</span></td><td>'+(r.updated?esc(r.updated):'')+'</td><td><details><summary>anzeigen</summary><div class="mono">'+esc((r.stdout||'')+(r.stderr?'\nERR:\n'+r.stderr:''))+'</div></details></td></tr>').join(''); }
+function renderInventory(){ document.getElementById('inventoryBody').innerHTML=state.inventory.slice(0,80).map(i=>'<tr><td>'+esc(i.nodeName||i.nodeid)+'</td><td>'+esc(i.platform||'')+'</td><td>'+((i.packages||[]).length)+'</td><td>'+(i.updatedAt?esc(i.updatedAt):'')+'</td></tr>').join(''); }
+function fillEditor(job){ document.getElementById('editorTitle').textContent=job&&job.id?'Job bearbeiten':'Job anlegen'; document.getElementById('jobName').value=job&&job.name||''; document.getElementById('jobType').value=job&&job.scriptType||'powershell'; document.getElementById('jobDescription').value=job&&job.description||''; document.getElementById('jobScript').value=job&&job.scriptBody||''; const s=job&&job.schedule||{mode:'manual'}; document.getElementById('scheduleMode').value=s.mode||'manual'; document.getElementById('intervalMinutes').value=s.intervalMinutes||60; document.getElementById('scheduleHour').value=s.hour==null?18:s.hour; document.getElementById('scheduleMinute').value=s.minute==null?0:s.minute; document.getElementById('scheduleOnce').value=s.runAt||''; Array.from(document.querySelectorAll('.weekday')).forEach(x=>{ x.checked=(s.weekdays||[]).includes(Number(x.value)); }); const assigned=new Set(job&&job.nodeIds||[]); Array.from(document.querySelectorAll('#devicesBody input[type=checkbox]')).forEach(x=>{ x.checked=assigned.has(x.value); }); toggleScheduleFields(); }
+function newJob(){ selectedJobId=null; fillEditor(null); renderJobs(); document.getElementById('saveResult').textContent=''; }
+function pickJob(id){ selectedJobId=id; const job=state.jobs.find(x=>x.id===id); renderJobs(); fillEditor(job); }
+function selectVisibleDevices(flag){ visibleDeviceRows().forEach(tr=>{ const cb=tr.querySelector('input[type=checkbox]'); if(cb) cb.checked=flag; }); }
+async function reloadAll(){ state=await apiGet('data'); renderStats(); renderDevices(); renderJobs(); renderRuns(); renderInventory(); if(selectedJobId){ const job=state.jobs.find(x=>x.id===selectedJobId); fillEditor(job||null); if(!job) selectedJobId=null; } else { fillEditor(null); } }
+async function saveJob(enqueue){ const name=document.getElementById('jobName').value.trim(); const script=document.getElementById('jobScript').value; const deviceIds=selectedDeviceIds(); if(!name){ document.getElementById('saveResult').textContent='Bitte zuerst einen Namen vergeben.'; return; } if(!script.trim()){ document.getElementById('saveResult').textContent='Bitte ein Skript hinterlegen.'; return; } if(deviceIds.length===0){ document.getElementById('saveResult').textContent='Bitte mindestens ein Zielgeraet auswaehlen.'; return; } const payload={ id:selectedJobId, name:name, description:document.getElementById('jobDescription').value.trim(), scriptType:document.getElementById('jobType').value, scriptBody:script, schedule:getSchedule(), targetNodeIds:deviceIds, enqueueNow:!!enqueue }; const r=await apiPost('saveJob',payload); if(!r.ok){ document.getElementById('saveResult').textContent='Fehler: '+(r.error||'unbekannt'); return; } selectedJobId=r.job.id; document.getElementById('saveResult').textContent='Job gespeichert.'; log('Job "'+r.job.name+'" gespeichert.'); await reloadAll(); }
+async function queueEditedJob(){ if(!selectedJobId){ document.getElementById('saveResult').textContent='Bitte den Job erst speichern.'; return; } const r=await apiPost('queueJobs',{jobIds:[selectedJobId],reason:'manual-ui'}); if(r.ok){ log('Job in die Warteschlange gestellt.'); await reloadAll(); } }
+async function deleteJob(){ if(!selectedJobId) return; if(!confirm('Diesen Job wirklich loeschen?')) return; const r=await apiPost('deleteJob',{id:selectedJobId}); if(r.ok){ log('Job geloescht.'); selectedJobId=null; await reloadAll(); } }
+async function refreshQueue(){ await reloadAll(); }
+async function refreshInventories(){ const r=await apiPost('refreshInventoryAll',{}); log(r.ok ? ('Inventar fuer '+(r.sent||0)+' Online-Geraete angefragt.') : 'Inventar-Anfrage fehlgeschlagen.'); setTimeout(reloadAll,1500); }
+document.getElementById('jobFilter').addEventListener('input',applyFilters); document.getElementById('deviceFilter').addEventListener('input',applyFilters); reloadAll(); setInterval(refreshQueue,30000);`;
+
     return renderShell('Software Orchestrator', 'admin', body, script);
   }
 
   function renderUserPage(nodeid) {
     const safeNodeId = escHtml(nodeid || '');
     const body = `
-<div class="card"><div class="flex" style="justify-content:space-between"><div><h2>Software Orchestrator</h2><div class="muted">Geraet: <span class="mono" id="nodeid">${safeNodeId}</span></div></div><div class="badge" id="adapterBadge">Lade...</div></div></div>
-<div class="grid cols" style="margin-top:16px">
-  <div class="card"><h3>Zugewiesene Jobs</h3><div id="jobs"></div></div>
-  <div class="card"><h3>Softwareinventar</h3><div class="flex" style="margin-bottom:12px"><button onclick="refreshInventory()">Inventar aktualisieren</button><span class="muted" id="invResult"></span></div><div id="inventory"></div></div>
+<header class="card"><div class="title">Softwareinventar und Jobs</div><div class="subtitle">Geraet: <span class="mono">${safeNodeId}</span></div></header>
+<div class="grid two">
+  <div class="card section"><div class="toolbar space"><h2>Zugewiesene Jobs</h2><button class="btn secondary" onclick="reloadAll()">Aktualisieren</button></div><div class="scroll"><table class="list"><thead><tr><th>Job</th><th>Plan</th><th>Aktion</th></tr></thead><tbody id="jobsBody"></tbody></table></div></div>
+  <div class="card section"><div class="toolbar space"><h2>Softwareinventar</h2><button class="btn secondary" onclick="refreshInventory()">Inventar aktualisieren</button></div><div class="scroll" id="inventoryWrap"></div></div>
 </div>
-<div class="card" style="margin-top:16px"><h3>Letzte Runs</h3><div id="runs"></div></div>`;
+<div class="card section" style="margin-top:16px"><h2>Letzte Runs</h2><div class="scroll"><table class="list"><thead><tr><th>Job</th><th>Status</th><th>Zeit</th><th>Ausgabe</th></tr></thead><tbody id="runsBody"></tbody></table></div></div>`;
+
     const script = `
-const nodeid = ${JSON.stringify(nodeid || '')};
-let state = {};
-async function refresh(){ state = await apiGet('data&nodeid='+encodeURIComponent(nodeid)); document.getElementById('adapterBadge').textContent = state.adapter && state.adapter.scriptTaskDetected ? 'ScriptTask erkannt' : 'Agent-Fallback'; renderJobs(); renderInv(); renderRuns(); }
-function renderJobs(){ const jobs = (state.jobs||[]).filter(j => (j.nodeIds||[]).includes(nodeid)); document.getElementById('jobs').innerHTML = jobs.length ? '<table><thead><tr><th>Name</th><th>Plan</th><th>Aktion</th></tr></thead><tbody>'+jobs.map(j=>'<tr><td><strong>'+j.name+'</strong><br><span class="muted">'+(j.description||'')+'</span></td><td>'+fmtSchedule(j.schedule)+'</td><td><button onclick="queueJob(\''+j.id+'\')">Jetzt ausfuehren</button></td></tr>').join('')+'</tbody></table>' : '<div class="muted">Keine Jobs zugewiesen.</div>'; }
-function renderInv(){ const inv = (state.inventory||[])[0]; if(!inv){ document.getElementById('inventory').innerHTML = '<div class="muted">Noch kein Inventar vorhanden.</div>'; return; } document.getElementById('inventory').innerHTML = '<div class="muted" style="margin-bottom:8px">Aktualisiert: '+(inv.updatedAt||'')+'</div><div style="max-height:440px;overflow:auto"><table><thead><tr><th>Name</th><th>Version</th><th>Hersteller</th></tr></thead><tbody>'+ (inv.packages||[]).slice(0,500).map(p=>'<tr><td>'+((p.name||p.DisplayName||''))+'</td><td>'+((p.version||p.DisplayVersion||''))+'</td><td>'+((p.publisher||p.Publisher||''))+'</td></tr>').join('') +'</tbody></table></div>'; }
-function renderRuns(){ const runs = (state.runs||[]).slice(0,30); document.getElementById('runs').innerHTML = '<table><thead><tr><th>Job</th><th>Status</th><th>Zeit</th><th>Ausgabe</th></tr></thead><tbody>'+runs.map(r=>'<tr><td>'+r.scriptName+'</td><td>'+r.status+'</td><td>'+(r.updated||r.created||'')+'</td><td><details><summary>anzeigen</summary><div class="mono">'+(r.stdout||'')+(r.stderr?'\nERR:\n'+r.stderr:'')+'</div></details></td></tr>').join('')+'</tbody></table>'; }
-async function queueJob(jobId){ await apiPost('queueJobs',{ jobIds:[jobId], nodeIds:[nodeid], reason:'device-tab' }); refresh(); }
-async function refreshInventory(){ const r = await apiPost('refreshInventory',{ nodeid }); document.getElementById('invResult').textContent = r.ok ? 'Anfrage gesendet' : 'Fehler'; setTimeout(refresh, 1500); }
-refresh(); setInterval(refresh, 30000);`;
+const nodeid=${JSON.stringify(nodeid||'')};
+let state={};
+async function reloadAll(){ state=await apiGet('data&nodeid='+encodeURIComponent(nodeid)); renderJobs(); renderInventory(); renderRuns(); }
+function renderJobs(){ const jobs=(state.jobs||[]).filter(j=>(j.nodeIds||[]).includes(nodeid)); document.getElementById('jobsBody').innerHTML=jobs.length?jobs.map(j=>'<tr><td><strong>'+esc(j.name)+'</strong><div class="muted small">'+esc(j.description||'')+'</div></td><td>'+esc(fmtSchedule(j.schedule))+'</td><td><button class="btn" onclick="queueJob(\''+j.id+'\')">Jetzt ausfuehren</button></td></tr>').join(''):'<tr><td colspan="3" class="muted">Keine Jobs zugewiesen.</td></tr>'; }
+function renderInventory(){ const inv=(state.inventory||[])[0]; if(!inv){ document.getElementById('inventoryWrap').innerHTML='<div class="muted">Noch kein Inventar vorhanden.</div>'; return; } document.getElementById('inventoryWrap').innerHTML='<div class="muted" style="margin-bottom:8px">Aktualisiert: '+esc(inv.updatedAt||'')+'</div><table class="list"><thead><tr><th>Name</th><th>Version</th><th>Hersteller</th></tr></thead><tbody>'+ (inv.packages||[]).slice(0,500).map(p=>'<tr><td>'+esc(p.name||p.DisplayName||'')+'</td><td>'+esc(p.version||p.DisplayVersion||'')+'</td><td>'+esc(p.publisher||p.Publisher||'')+'</td></tr>').join('') +'</tbody></table>'; }
+function renderRuns(){ document.getElementById('runsBody').innerHTML=(state.runs||[]).slice(0,30).map(r=>'<tr><td>'+esc(r.scriptName||'')+'</td><td><span class="status-pill '+statusClass(r.status)+'">'+esc(r.status||'')+'</span></td><td>'+esc(r.updated||r.created||'')+'</td><td><details><summary>anzeigen</summary><div class="mono">'+esc((r.stdout||'')+(r.stderr?'\nERR:\n'+r.stderr:''))+'</div></details></td></tr>').join(''); }
+async function queueJob(jobId){ await apiPost('queueJobs',{jobIds:[jobId],nodeIds:[nodeid],reason:'device-tab'}); reloadAll(); }
+async function refreshInventory(){ await apiPost('refreshInventory',{nodeid:nodeid}); setTimeout(reloadAll,1500); }
+reloadAll(); setInterval(reloadAll,30000);`;
+
     return renderShell('Software Orchestrator', 'user', body, script);
   }
 
@@ -380,12 +408,13 @@ refresh(); setInterval(refresh, 30000);`;
     pluginHandler.registerPluginTab({ tabTitle: 'Software Orchestrator', tabId: 'pluginSworch' });
     var nodeId = '';
     try { if (typeof currentNode !== 'undefined' && currentNode) nodeId = currentNode._id || ''; } catch (e) { }
-    QA('pluginSworch', '<iframe id="pluginIframeSworch" style="width:100%;height:760px;overflow:auto;border:0;background:#fff" scrolling="yes" frameBorder="0" src="/pluginadmin.ashx?pin=sworch&user=1&nodeid=' + encodeURIComponent(nodeId) + '"></iframe>');
+    QA('pluginSworch', '<iframe id="pluginIframeSworch" style="width:100%;height:820px;overflow:auto;border:0;background:#14181e" scrolling="yes" frameBorder="0" src="/pluginadmin.ashx?pin=sworch&user=1&nodeid=' + encodeURIComponent(nodeId) + '"></iframe>');
   };
 
   obj.server_startup = function () {
     clearInterval(obj.intervalTimer);
     obj.intervalTimer = setInterval(processQueue, Number(obj.db.data.settings.queuePollSeconds || 30) * 1000);
+    setTimeout(processQueue, 1500);
   };
 
   obj.handleAdminReq = async function (req, res, user) {
@@ -401,42 +430,40 @@ refresh(); setInterval(refresh, 30000);`;
         if (api === 'saveJob') {
           if (!isAdmin) return res.sendStatus(401);
           const body = await parseBody(req);
+          const id = body.id || obj.db.id('job');
+          const existing = body.id ? obj.db.get('jobs', body.id) : null;
+          const schedule = body.schedule || { mode: 'manual' };
+          const nextRunAt = computeNextRun(schedule, new Date());
           const job = {
-            id: obj.db.id('job'),
+            id,
             name: body.name || 'Neuer Job',
             description: body.description || '',
             scriptType: body.scriptType || 'powershell',
             scriptBody: body.scriptBody || '',
-            parameters: body.parameters || {},
-            schedule: body.schedule || { mode: 'manual' },
-            maxAttempts: Number(body.maxAttempts || obj.db.data.settings.maxAttempts || 3),
+            parameters: body.parameters || existing?.parameters || {},
+            schedule: { ...schedule, nextRunAt },
+            maxAttempts: Number(body.maxAttempts || existing?.maxAttempts || obj.db.data.settings.maxAttempts || 3),
             enabled: body.enabled !== false,
-            expiresAt: body.expiresAt || null,
-            createdAt: nowIso(),
+            expiresAt: body.expiresAt || existing?.expiresAt || null,
+            createdAt: existing?.createdAt || nowIso(),
             updatedAt: nowIso()
           };
           obj.db.upsert('jobs', job.id, job);
-          uniq(body.targetNodeIds || []).forEach(nodeid => ensureAssignment(job.id, nodeid));
+          replaceAssignments(job.id, body.targetNodeIds || []);
           if (body.enqueueNow) uniq(body.targetNodeIds || []).forEach(nodeid => enqueueRun(job, nodeid, 'manual'));
           return sendJson(res, { ok: true, job }, 201);
         }
-        if (api === 'bulkAssign') {
+        if (api === 'deleteJob') {
           if (!isAdmin) return res.sendStatus(401);
           const body = await parseBody(req);
-          const jobIds = uniq(body.jobIds || []);
-          const nodeIds = uniq(body.nodeIds || []);
-          const out = [];
-          for (const jobId of jobIds) {
-            const job = obj.db.get('jobs', jobId);
-            if (!job) continue;
-            for (const nodeid of nodeIds) {
-              out.push(ensureAssignment(jobId, nodeid));
-              if (body.enqueueNow) enqueueRun(job, nodeid, 'bulk-assign');
-            }
-          }
-          return sendJson(res, { ok: true, assignments: out });
+          const id = body.id;
+          if (!id) return sendJson(res, { ok: false, error: 'id fehlt' }, 400);
+          obj.db.remove('jobs', id);
+          for (const entry of obj.db.list('assignments').filter(x => x.jobId === id)) obj.db.remove('assignments', entry.id);
+          return sendJson(res, { ok: true });
         }
         if (api === 'queueJobs') {
+          if (!user) return res.sendStatus(401);
           const body = await parseBody(req);
           const jobIds = uniq(body.jobIds || []);
           const nodeIds = uniq(body.nodeIds || []);
@@ -457,7 +484,7 @@ refresh(); setInterval(refresh, 30000);`;
         if (api === 'refreshInventoryAll') {
           if (!isAdmin) return res.sendStatus(401);
           let sent = 0;
-          for (const d of getDevices().filter(x => x.online)) { if (requestInventory(d.nodeid)) sent++; }
+          for (const d of getDevices().filter(x => x.online)) if (requestInventory(d.nodeid)) sent++;
           return sendJson(res, { ok: true, sent });
         }
         return sendJson(res, { ok: false, error: 'Unknown api' }, 404);
@@ -472,6 +499,7 @@ refresh(); setInterval(refresh, 30000);`;
       return res.end(renderAdminPage());
     }
     if (wantsUser) {
+      if (!user) return res.sendStatus(401);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       return res.end(renderUserPage(req.query.nodeid || ''));
     }
