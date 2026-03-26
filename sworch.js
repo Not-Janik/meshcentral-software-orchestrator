@@ -349,6 +349,11 @@ module.exports.sworch = function (parent) {
       '<div class="toolbar" style="padding-left:0;padding-right:0;border-bottom:0;margin-top:10px"><button onclick="saveJob()">Speichern</button><button class="alt" onclick="queueSelected()">Jetzt ausführen</button><button class="danger" onclick="deleteSelected()">Löschen</button><span id="msg" class="hint"></span></div>' +
       '</div></div>' +
       '<div class="card" style="margin-top:16px"><h2>Warteschlange / Verlauf</h2><div id="runs" class="scroll"></div></div>' +
+      '<div class="card" style="margin-top:16px"><h2>Mehrfachzuweisung (Jobs ↔ Geräte)</h2><div class="section">' +
+      '<div class="split"><div><label>Jobs (mehrfach)</label><input id="bulkJobFilter" placeholder="Jobs filtern" oninput="renderBulkJobs()"><div class="scroll card" style="margin-top:6px;padding:0;border-radius:2px"><div id="bulkJobs" class="section"></div></div></div>' +
+      '<div><label>Geräte (mehrfach)</label><input id="bulkDeviceFilter" placeholder="Geräte filtern" oninput="renderBulkDevices()"><div class="scroll card" style="margin-top:6px;padding:0;border-radius:2px"><div id="bulkDevices" class="section"></div></div></div></div>' +
+      '<div class="toolbar" style="padding-left:0;padding-right:0;border-bottom:0;margin-top:10px"><button class="alt" onclick="bulkAssign()">Ausgewählte Jobs zuweisen</button><button onclick="bulkQueue()">Ausgewählte Jobs starten</button><span id="bulkMsg" class="hint"></span></div>' +
+      '<div id="bulkSummary" class="hint"></div></div></div>' +
       '<div class="card" style="margin-top:16px"><div class="toolbar"><strong>Softwareinventar</strong><button class="alt small" onclick="refreshInventoryAll()">Online-Geräte aktualisieren</button><span id="invMsg" class="hint"></span></div><div id="inventory" class="scroll"></div></div>' +
       '</div></div>';
 
@@ -363,12 +368,18 @@ function renderJobs(){ var q=(document.getElementById('jobSearch').value||'').to
  document.getElementById('jobs').innerHTML = html; }
 function renderRuns(){ var rows=(state.runs||[]).slice(0,80).map(function(r){ return '<tr><td>'+escapeHtml(r.nodeName||r.nodeid)+'</td><td>'+escapeHtml(r.scriptName||'')+'</td><td><span class="status '+statusClass(r.status)+'">'+escapeHtml(r.status||'')+'</span></td><td>'+escapeHtml(r.updated||r.created||'')+'</td><td><details><summary>Ausgabe</summary><div class="mono">'+escapeHtml((r.stdout||'') + ((r.stderr||'') ? '\nERR:\n' + r.stderr : ''))+'</div></details></td></tr>'; }).join(''); document.getElementById('runs').innerHTML='<table><thead><tr><th>Gerät</th><th>Job</th><th>Status</th><th>Letzte Aktion</th><th>Zustandsmeldung</th></tr></thead><tbody>'+rows+'</tbody></table>'; }
 function renderInventory(){ var rows=(state.inventory||[]).slice(0,100).map(function(i){ return '<tr><td>'+escapeHtml(i.nodeName||i.nodeid)+'</td><td>'+escapeHtml(i.platform||'')+'</td><td>'+(i.packages?i.packages.length:0)+'</td><td>'+escapeHtml(i.updatedAt||'')+'</td></tr>'; }).join(''); document.getElementById('inventory').innerHTML='<table><thead><tr><th>Gerät</th><th>Plattform</th><th>Software</th><th>Aktualisiert</th></tr></thead><tbody>'+rows+'</tbody></table>'; }
+function renderBulkJobs(){ var q=(document.getElementById('bulkJobFilter').value||'').toLowerCase(); var html=''; (state.jobs||[]).slice().sort(byFolderThenName).filter(function(j){ return !q || (j.name||'').toLowerCase().includes(q) || (j.folder||'').toLowerCase().includes(q); }).forEach(function(j){ html += '<label class="choice"><input type="checkbox" class="bulkjobcb" value="'+j.id+'"> <span>'+escapeHtml(j.name||'Job')+'</span> <span class="muted">'+escapeHtml(j.folder||'')+'</span></label>'; }); document.getElementById('bulkJobs').innerHTML = html || '<div class="muted">Keine Jobs gefunden.</div>'; updateBulkSummary(); }
+function renderBulkDevices(){ var q=(document.getElementById('bulkDeviceFilter').value||'').toLowerCase(); var html=''; (state.devices||[]).filter(function(d){ return !q || (d.name||'').toLowerCase().includes(q); }).forEach(function(d){ html += '<label class="choice"><input type="checkbox" class="bulkdevicecb" value="'+d.nodeid+'"> <span>'+escapeHtml(d.name)+'</span> <span class="muted">'+(d.online?'online':'offline')+'</span></label>'; }); document.getElementById('bulkDevices').innerHTML = html || '<div class="muted">Keine Geräte gefunden.</div>'; updateBulkSummary(); }
 function updateScheduleFields(){ var mode=document.getElementById('f_mode').value; document.getElementById('schedule_interval').classList.toggle('hidden', mode!=='interval'); document.getElementById('schedule_clock').classList.toggle('hidden', !(mode==='daily'||mode==='weekly')); document.getElementById('weekly_wrap').classList.toggle('hidden', mode!=='weekly'); document.getElementById('schedule_once').classList.toggle('hidden', mode!=='once'); }
 function fillForm(job){ job=job||blankJob(); document.getElementById('f_name').value=job.name||''; document.getElementById('f_folder').value=job.folder||''; document.getElementById('f_description').value=job.description||''; document.getElementById('f_type').value=job.scriptType||'powershell'; document.getElementById('f_script').value=job.scriptBody||''; var s=job.schedule||{mode:'manual'}; document.getElementById('f_mode').value=s.mode||'manual'; document.getElementById('f_interval').value=s.intervalMinutes||60; document.getElementById('f_hour').value=(s.hour==null?18:s.hour); document.getElementById('f_minute').value=(s.minute==null?0:s.minute); document.getElementById('f_weekdays').value=(s.weekdays||[1,2,3,4,5]).join(','); document.getElementById('f_runAt').value=s.runAt||''; updateScheduleFields(); renderDeviceChoices(job.nodeIds||[]); document.getElementById('jobStatus').textContent = job.id ? ('ID: '+job.id+' · '+fmtSchedule(job.schedule)+' · '+(job.assignedCount||0)+' Gerät(e)') : 'Neuer, noch nicht gespeicherter Job.'; }
 function renderDeviceChoices(selected){ selected = selected || getCheckedNodes(); var q=(document.getElementById('deviceFilter').value||'').toLowerCase(); var html=''; (state.devices||[]).filter(function(d){ return !q || (d.name||'').toLowerCase().includes(q); }).forEach(function(d){ var checked = selected.indexOf(d.nodeid)>=0 ? 'checked' : ''; html += '<label class="choice"><input type="checkbox" class="nodecb" value="'+d.nodeid+'" '+checked+'> <span>'+escapeHtml(d.name)+'</span> <span class="muted">'+(d.online?'online':'offline')+'</span></label>'; }); document.getElementById('deviceChoices').innerHTML = html || '<div class="muted">Keine Geräte gefunden.</div>'; updateSelectedSummary(); }
 function getCheckedNodes(){ return Array.from(document.querySelectorAll('.nodecb:checked')).map(function(x){ return x.value; }); }
+function getBulkJobIds(){ return Array.from(document.querySelectorAll('.bulkjobcb:checked')).map(function(x){ return x.value; }); }
+function getBulkDeviceIds(){ return Array.from(document.querySelectorAll('.bulkdevicecb:checked')).map(function(x){ return x.value; }); }
 function updateSelectedSummary(){ var s=getCheckedNodes(); document.getElementById('selectedSummary').textContent = s.length ? (s.length + ' Gerät(e) ausgewählt') : 'Kein Gerät ausgewählt'; }
+function updateBulkSummary(){ var j=getBulkJobIds(); var d=getBulkDeviceIds(); document.getElementById('bulkSummary').textContent = j.length + ' Job(s), ' + d.length + ' Gerät(e) ausgewählt'; }
 document.addEventListener('change', function(e){ if(e.target && e.target.classList.contains('nodecb')) updateSelectedSummary(); });
+document.addEventListener('change', function(e){ if(e.target && (e.target.classList.contains('bulkjobcb') || e.target.classList.contains('bulkdevicecb'))) updateBulkSummary(); });
 function currentSchedule(){ var mode=document.getElementById('f_mode').value; var s={mode:mode}; if(mode==='interval'){ s.intervalMinutes=Number(document.getElementById('f_interval').value||60); } if(mode==='daily' || mode==='weekly'){ s.hour=Number(document.getElementById('f_hour').value||0); s.minute=Number(document.getElementById('f_minute').value||0); } if(mode==='weekly'){ s.weekdays=(document.getElementById('f_weekdays').value||'').split(',').map(function(x){ return Number(x.trim()); }).filter(function(x){ return !Number.isNaN(x); }); } if(mode==='once'){ s.runAt=document.getElementById('f_runAt').value||null; } return s; }
 function escapeHtml(v){ return String(v==null?'':v).replace(/[&<>"']/g,function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]; }); }
 function selectJob(id){ selectedJobId=id; renderJobs(); fillForm(state.jobs.find(j=>j.id===id)); }
@@ -378,6 +389,8 @@ async function saveJob(){ var payload = { id:selectedJobId||'', name:document.ge
 async function queueSelected(){ if(!selectedJobId){ document.getElementById('msg').textContent='Bitte zuerst einen gespeicherten Job wählen.'; return; } var r = await apiPost('queueJobs', { jobIds:[selectedJobId], nodeIds:getCheckedNodes() }); document.getElementById('msg').textContent = r.ok ? 'Zur Warteschlange hinzugefügt' : ('Fehler: ' + (r.error||'')); if(r.ok) refresh(); }
 async function deleteSelected(){ if(!selectedJobId){ document.getElementById('msg').textContent='Kein Job ausgewählt.'; return; } if(!confirm('Job wirklich löschen?')) return; var r = await apiPost('deleteJob', { id:selectedJobId }); document.getElementById('msg').textContent = r.ok ? 'Gelöscht' : ('Fehler: ' + (r.error||'')); if(r.ok){ selectedJobId=''; refresh(); } }
 async function refreshInventoryAll(){ var r = await apiPost('refreshInventoryAll', {}); document.getElementById('invMsg').textContent = r.ok ? ('Anfragen gesendet: ' + (r.sent||0)) : ('Fehler: ' + (r.error||'')); }
+async function bulkAssign(){ var jobIds=getBulkJobIds(); var nodeIds=getBulkDeviceIds(); if(!jobIds.length || !nodeIds.length){ document.getElementById('bulkMsg').textContent='Bitte Jobs und Geräte auswählen.'; return; } var r=await apiPost('assignJobs', { jobIds:jobIds, nodeIds:nodeIds }); document.getElementById('bulkMsg').textContent = r.ok ? ('Zuordnungen aktualisiert: ' + (r.assignments||0)) : ('Fehler: ' + (r.error||'')); if(r.ok) refresh(); }
+async function bulkQueue(){ var jobIds=getBulkJobIds(); var nodeIds=getBulkDeviceIds(); if(!jobIds.length || !nodeIds.length){ document.getElementById('bulkMsg').textContent='Bitte Jobs und Geräte auswählen.'; return; } var r=await apiPost('queueJobs', { jobIds:jobIds, nodeIds:nodeIds, reason:'bulk' }); document.getElementById('bulkMsg').textContent = r.ok ? ('In Warteschlange: ' + ((r.runs||[]).length||0)) : ('Fehler: ' + (r.error||'')); if(r.ok) refresh(); }
 refresh(); setInterval(refresh, 30000);
 `;
     return shellHtml('Software Orchestrator', 'admin', body, js);
@@ -476,6 +489,23 @@ refresh(); setInterval(refresh, 30000);
           let runs = [];
           jobIds.forEach(function (jobId) { runs = runs.concat(queueJob(jobId, nodeIds, body.reason || 'manual')); });
           return sendJson(res, { ok: true, runs: runs });
+        }
+        if (api === 'assignJobs') {
+          if (!isAdmin) return res.sendStatus(401);
+          const body = await parseBody(req);
+          const jobIds = uniq(body.jobIds || []);
+          const nodeIds = uniq(body.nodeIds || []);
+          if (!jobIds.length || !nodeIds.length) return sendJson(res, { ok: false, error: 'Missing jobIds or nodeIds' }, 400);
+          let assignments = 0;
+          jobIds.forEach(function (jobId) {
+            const job = obj.db.get('jobs', jobId);
+            if (!job) return;
+            nodeIds.forEach(function (nodeid) {
+              ensureAssignment(jobId, nodeid);
+              assignments++;
+            });
+          });
+          return sendJson(res, { ok: true, assignments: assignments });
         }
         if (api === 'refreshInventory') {
           const body = await parseBody(req);
